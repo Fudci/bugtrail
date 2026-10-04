@@ -1,0 +1,10 @@
+node_modules
+.env
+dist
+packages/db/src/generated
+pgdata
+.DS_Store
+data/
+.claude/
+*.log
+coverage/

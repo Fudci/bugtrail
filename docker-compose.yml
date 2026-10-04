@@ -1,0 +1,24 @@
+# bugtool: satu container. Data SQLite tersimpan di volume "bugtool-data".
+#   docker compose up -d --build
+#   (admin pertama: set ADMIN_EMAIL + ADMIN_PASSWORD, atau: docker compose exec bugtool node create-admin.js)
+services:
+  bugtool:
+    build: .
+    image: bugtool:latest
+    container_name: bugtool
+    ports:
+      - "${BUGTOOL_PORT:-4000}:4000"
+    environment:
+      # URL publik (dipakai di DSN dan link undangan). Ganti ke domain HTTPS di produksi.
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:4000}
+      WEB_URL: ${PUBLIC_URL:-http://localhost:4000}
+      # Admin pertama, dibuat saat start hanya jika belum ada user sama sekali.
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+    volumes:
+      - bugtool-data:/data
+    mem_limit: 384m
+    restart: unless-stopped
+
+volumes:
+  bugtool-data:

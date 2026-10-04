@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="BugTrail">
+  <!-- Versi kecil (favicon): hanya kumbang + 2 titik jejak, supaya tetap terbaca di 16–32 px -->
+  <rect width="64" height="64" rx="15" fill="#1f1f1d"/>
+  <circle cx="13" cy="51" r="3.6" fill="#f4cf4f"/><circle cx="22" cy="42" r="3.6" fill="#f4cf4f"/>
+  <g transform="translate(39 27) rotate(45)">
+    <g stroke="#e5484d" stroke-width="3.4" stroke-linecap="round">
+      <path d="M-8 -4 L-16 -8"/><path d="M-9 4 L-17 6"/><path d="M8 -4 L16 -8"/><path d="M9 4 L17 6"/>
+    </g>
+    <circle cx="0" cy="-13" r="6" fill="#e5484d"/>
+    <ellipse cx="0" cy="2" rx="10.5" ry="12.5" fill="#e5484d"/>
+    <path d="M0 -8 L0 13" stroke="#1f1f1d" stroke-width="2.2" stroke-linecap="round"/>
+  </g>
+</svg>

@@ -1,0 +1,212 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+enum Role {
+  admin
+  member
+  viewer
+}
+
+enum IssueStatus {
+  unresolved
+  resolved
+  ignored
+}
+
+enum Level {
+  fatal
+  error
+  warning
+  info
+  debug
+}
+
+model Organization {
+  id        String    @id @default(uuid())
+  name      String
+  slug      String    @unique
+  createdAt DateTime  @default(now()) @map("created_at")
+  projects  Project[]
+
+  @@map("organizations")
+}
+
+model User {
+  id           String    @id @default(uuid())
+  email        String    @unique
+  name         String?
+  passwordHash String?   @map("password_hash")
+  isAdmin      Boolean   @default(false) @map("is_admin")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  memberships  Member[]
+  assigned     Issue[]
+  sessions     Session[]
+  invitesSent  Invite[]
+  uploadTokens UploadToken[]
+
+  @@map("users")
+}
+
+model Member {
+  projectId String   @map("project_id")
+  userId    String   @map("user_id")
+  role      Role     @default(member)
+  createdAt DateTime @default(now()) @map("created_at")
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([projectId, userId])
+  @@map("members")
+}
+
+model Project {
+  id             String       @id @default(uuid())
+  organizationId String       @map("organization_id")
+  name           String
+  slug           String
+  platform       String?
+  publicId       Int?         @unique @map("public_id") // dipakai di DSN (SDK butuh angka)
+  retentionMaxEvents Int    @default(10000) @map("retention_max_events")
+  retentionDays      Int    @default(90) @map("retention_days")
+  discordWebhookUrl   String?  @map("discord_webhook_url")
+  alertNewIssue       Boolean  @default(true) @map("alert_new_issue")
+  alertRegression     Boolean  @default(true) @map("alert_regression")
+  alertSpikeThreshold Int?     @map("alert_spike_threshold")
+  alertSpikeMinutes   Int      @default(5) @map("alert_spike_minutes")
+  lastSpikeAlertAt    String?  @map("last_spike_alert_at")
+  createdAt      DateTime     @default(now()) @map("created_at")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  members        Member[]
+  dsnKeys        DsnKey[]
+  issues         Issue[]
+  events         Event[]
+  invites        Invite[]
+  uploadTokens   UploadToken[]
+  artifacts      Artifact[]
+
+  @@unique([organizationId, slug])
+  @@map("projects")
+}
+
+model DsnKey {
+  id        String    @id @default(uuid())
+  projectId String    @map("project_id")
+  publicKey String    @unique @map("public_key")
+  label     String    @default("Default")
+  revokedAt DateTime? @map("revoked_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  project   Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@map("dsn_keys")
+}
+
+model Issue {
+  id          String      @id @default(uuid())
+  projectId   String      @map("project_id")
+  fingerprint String
+  title       String
+  culprit     String?
+  level       Level       @default(error)
+  status      IssueStatus @default(unresolved)
+  eventCount  Int         @default(0) @map("event_count")
+  firstSeen   DateTime    @map("first_seen")
+  lastSeen    DateTime    @map("last_seen")
+  assigneeId  String?     @map("assignee_id")
+  firstRelease String?    @map("first_release")
+  project     Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  assignee    User?       @relation(fields: [assigneeId], references: [id], onDelete: SetNull)
+  events      Event[]
+
+  @@unique([projectId, fingerprint])
+  @@index([projectId, status, lastSeen(sort: Desc)])
+  @@index([projectId, firstRelease])
+  @@map("issues")
+}
+
+model Event {
+  id           String                    @id // event_id dari SDK
+  projectId    String                    @map("project_id")
+  issueId      String                    @map("issue_id")
+  receivedAt   DateTime                  @default(now()) @map("received_at")
+  timestamp    DateTime
+  level        Level                     @default(error)
+  release      String?
+  environment  String?
+  userId       String?                   @map("user_id")
+  payload      Json
+  project      Project                   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  issue        Issue                     @relation(fields: [issueId], references: [id], onDelete: Cascade)
+
+  @@index([issueId, receivedAt(sort: Desc)])
+  @@index([projectId, receivedAt])
+  @@index([projectId, release])
+  @@map("events")
+}
+
+// Sesi login; id = sha256 dari token cookie (token mentah tidak disimpan).
+model Session {
+  id        String   @id
+  userId    String   @map("user_id")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+// Undangan ke project; tokenHash = sha256 dari token di link.
+model Invite {
+  id          String    @id @default(uuid())
+  projectId   String    @map("project_id")
+  email       String
+  role        Role      @default(member)
+  tokenHash   String    @unique @map("token_hash")
+  invitedById String    @map("invited_by_id")
+  expiresAt   DateTime  @map("expires_at")
+  acceptedAt  DateTime? @map("accepted_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  project     Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  invitedBy   User      @relation(fields: [invitedById], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@map("invites")
+}
+
+model UploadToken {
+  id          String    @id @default(uuid())
+  projectId   String    @map("project_id")
+  name        String
+  tokenHash   String    @unique @map("token_hash")
+  createdById String?   @map("created_by_id")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  lastUsedAt  DateTime? @map("last_used_at")
+  project     Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdBy   User?     @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([projectId])
+  @@map("upload_tokens")
+}
+
+model Artifact {
+  id         String    @id @default(uuid())
+  projectId  String    @map("project_id")
+  debugId    String    @map("debug_id")
+  fileType   String    @map("file_type")
+  url        String?
+  sha1       String
+  size       Int
+  createdAt  DateTime  @default(now()) @map("created_at")
+  lastUsedAt DateTime? @map("last_used_at")
+  project    Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, debugId, fileType])
+  @@index([sha1])
+  @@map("artifacts")
+}

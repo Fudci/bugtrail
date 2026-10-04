@@ -1,0 +1,29 @@
+<!doctype html><html><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+<style>
+  *{margin:0;box-sizing:border-box} body{font-family:Inter,system-ui,sans-serif;color:#1d1d1b;background:transparent}
+  .wm{display:inline-flex;align-items:center;gap:26px;padding:20px 36px 20px 20px}
+  .wm img{width:120px;height:120px} .wm b{font-size:92px;font-weight:600;letter-spacing:-.045em}
+  .wm b span{color:#e5484d}
+  .wm.dark{background:#1f1f1d;color:#f1efe8;border-radius:36px}
+  .og{width:1200px;height:630px;position:relative;overflow:hidden;padding:72px 80px;
+      background:radial-gradient(900px 600px at 100% 0%,#f8e7a6 0%,transparent 60%),radial-gradient(700px 500px at 0% 100%,#f1efe8 0%,transparent 60%),linear-gradient(180deg,#ecebe6,#f2efe6)}
+  .og .top{display:flex;align-items:center;gap:20px} .og .top img{width:84px;height:84px} .og .top b{font-size:52px;font-weight:600;letter-spacing:-.04em}
+  .og h1{font-size:70px;font-weight:300;letter-spacing:-.04em;line-height:1.04;margin:56px 0 20px;max-width:760px}
+  .og p{font-size:26px;color:#4b4a46;max-width:700px}
+  .og .chips{display:flex;gap:12px;margin-top:40px}
+  .og .chip{height:46px;padding:0 20px;border-radius:999px;background:#1f1f1d;color:#fff;display:flex;align-items:center;font-size:19px}
+  .og .chip.acc{background:#f4cf4f;color:#1d1d1b}
+  .og .big{position:absolute;right:-70px;bottom:-70px;width:470px;height:470px;transform:rotate(-8deg);filter:drop-shadow(0 30px 60px rgba(60,50,20,.25))}
+</style></head><body>
+  <div id="wm" class="wm"><img src="mark.svg"><b>Bug<span>Trail</span></b></div>
+  <br>
+  <div id="wmdark" class="wm dark"><img src="mark.svg"><b>Bug<span>Trail</span></b></div>
+  <div id="og" class="og">
+    <div class="top"><img src="mark.svg"><b>BugTrail</b></div>
+    <h1>Follow every bug back to its source.</h1>
+    <p>Lightweight, self-hosted error tracking. Works with Sentry SDKs — just change the DSN.</p>
+    <div class="chips"><span class="chip acc">~100 MB RAM</span><span class="chip">1 container</span><span class="chip">Crash-safe</span><span class="chip">Source maps</span></div>
+    <img class="big" src="mark.svg">
+  </div>
+</body></html>

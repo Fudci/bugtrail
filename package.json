@@ -1,0 +1,31 @@
+{
+  "name": "bugtool",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.34.6",
+  "scripts": {
+    "dev:api": "pnpm --filter @bugtool/api dev",
+    "dev:web": "pnpm --filter @bugtool/web dev",
+    "db:migrate": "pnpm --filter @bugtool/db migrate",
+    "create-admin": "pnpm --filter @bugtool/api create-admin",
+    "db:seed": "pnpm --filter @bugtool/db seed",
+    "test": "vitest run",
+    "test:int": "node --env-file-if-exists=.env ./node_modules/vitest/vitest.mjs run -c vitest.int.config.ts",
+    "db:generate": "pnpm --filter @bugtool/db generate",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3",
+    "vitest": "^5.0.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@prisma/engines",
+      "better-sqlite3",
+      "esbuild",
+      "prisma"
+    ]
+  }
+}

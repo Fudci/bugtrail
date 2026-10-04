@@ -1,0 +1,7 @@
+**/node_modules
+**/dist
+**/.DS_Store
+packages/db/src/generated
+data
+.env
+.git
