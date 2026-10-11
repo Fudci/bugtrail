@@ -74,7 +74,7 @@ export class Symbolicator {
   private findArtifact;
   private touch;
 
-  constructor(private db: RawDb, private files: FileStore, private maxCacheBytes = 128 * 1024 * 1024) {
+  constructor(db: RawDb, private files: FileStore, private maxCacheBytes = 128 * 1024 * 1024) {
     this.findArtifact = db.prepare<[string, string], { sha1: string; last_used_at: string | null }>(
       "SELECT sha1, last_used_at FROM artifacts WHERE project_id = ? AND debug_id = ? AND file_type = 'source_map'",
     );

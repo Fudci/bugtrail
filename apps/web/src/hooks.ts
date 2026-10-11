@@ -18,6 +18,8 @@ const LAST_PROJECT = "bugtool:lastProject";
 export const rememberProject = (id: string) => localStorage.setItem(LAST_PROJECT, id);
 export const lastProject = () => localStorage.getItem(LAST_PROJECT);
 
+/** Nama tampilan user: nama, lalu username. */
+export const personName = (u: { name: string | null; username: string }) => u.name || u.username;
 export const initial = (s: string | null | undefined) => (s?.trim()[0] ?? "?").toUpperCase();
 
 const fmt = new Intl.DateTimeFormat("en-US", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });

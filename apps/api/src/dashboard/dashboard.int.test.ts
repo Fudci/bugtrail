@@ -40,8 +40,8 @@ beforeEach(async () => {
   const passwordHash = await hashPassword(PW);
   await prisma.user.createMany({
     data: [
-      { email: "admin@x.io", passwordHash, isAdmin: true },
-      { email: "budi@x.io", passwordHash },
+      { username: "admin", email: "admin@x.io", passwordHash, isAdmin: true },
+      { username: "budi", email: "budi@x.io", passwordHash },
     ],
   });
 });
@@ -116,7 +116,8 @@ describe("projects & membership", () => {
     expect(info.json()).toMatchObject({ email: "sari@x.io", hasAccount: false, project: { name: "P" } });
 
     expect((await app.inject({ method: "POST", url: `/api/0/invites/${token}/accept`, payload: { password: "short" } })).statusCode).toBe(400);
-    const acc = await app.inject({ method: "POST", url: `/api/0/invites/${token}/accept`, payload: { password: "sari-password-1" } });
+    expect((await app.inject({ method: "POST", url: `/api/0/invites/${token}/accept`, payload: { password: "sari-password-1" } })).statusCode).toBe(400); // tanpa username
+    const acc = await app.inject({ method: "POST", url: `/api/0/invites/${token}/accept`, payload: { username: "sari", password: "sari-password-1" } });
     expect(acc.statusCode).toBe(200);
     const sari = as({ cookie: `bt_session=${acc.cookies.find((c) => c.name === "bt_session")!.value}` });
 
@@ -127,6 +128,42 @@ describe("projects & membership", () => {
     expect((await sari.patch(`/issues/${issue.id}`, { status: "resolved" })).statusCode).toBe(404);
     // token sekali pakai
     expect((await app.inject({ method: "GET", url: `/api/0/invites/${token}` })).statusCode).toBe(404);
+  });
+
+  it("plain link invite: no email, the invitee picks a username, link works once", async () => {
+    const admin = as(await login("admin@x.io"));
+    const pid = (await admin.post("/projects", { name: "P" })).json().id;
+    const inv = await admin.post(`/projects/${pid}/invites`, { role: "member" });
+    expect(inv.statusCode).toBe(201);
+    expect(inv.json()).toMatchObject({ email: null, role: "member" });
+    const token = inv.json().link.split("/invite/")[1];
+    expect((await app.inject({ method: "GET", url: `/api/0/invites/${token}` })).json()).toMatchObject({ email: null, hasAccount: false });
+
+    const accept = (payload: object) => app.inject({ method: "POST", url: `/api/0/invites/${token}/accept`, payload });
+    expect((await accept({ username: "Bad Name!", password: "andi-password-1" })).statusCode).toBe(400);
+    expect((await accept({ username: "admin", password: "andi-password-1" })).statusCode).toBe(409); // sudah dipakai
+    expect((await accept({ username: "andi.s", email: "admin@x.io", password: "andi-password-1" })).statusCode).toBe(409); // email milik akun lain
+    const ok = await accept({ username: "Andi.S", name: "Andi", password: "andi-password-1" });
+    expect(ok.statusCode).toBe(200);
+    expect((await accept({ username: "someone", password: "other-password-1" })).statusCode).toBe(404); // sekali pakai
+
+    // Login dengan username (huruf besar/kecil tidak berpengaruh); email kosong.
+    const r = await app.inject({ method: "POST", url: "/api/0/auth/login", payload: { login: "ANDI.S", password: "andi-password-1" } });
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toMatchObject({ username: "andi.s", email: null, name: "Andi" });
+    const andi = as({ cookie: `bt_session=${r.cookies.find((c) => c.name === "bt_session")!.value}` });
+    expect((await andi.get(`/projects/${pid}`)).json().role).toBe("member");
+    const members = (await admin.get(`/projects/${pid}/members`)).json().members;
+    expect(members.map((m: { username: string }) => m.username)).toContain("andi.s");
+  });
+
+  it("a signed-in user can accept a plain link invite with their existing account", async () => {
+    const admin = as(await login("admin@x.io"));
+    const pid = (await admin.post("/projects", { name: "P" })).json().id;
+    const token = (await admin.post(`/projects/${pid}/invites`, { role: "viewer" })).json().link.split("/invite/")[1];
+    const budi = as(await login("budi@x.io"));
+    expect((await budi.post(`/invites/${token}/accept`)).statusCode).toBe(200);
+    expect((await budi.get(`/projects/${pid}`)).json().role).toBe("viewer");
   });
 
   it("existing user must be logged in as invited email to accept", async () => {
@@ -140,6 +177,60 @@ describe("projects & membership", () => {
     const budi = as(await login("budi@x.io"));
     expect((await budi.post(`/invites/${token}/accept`)).statusCode).toBe(200);
     expect((await budi.get("/projects")).json()[0].role).toBe("member");
+  });
+
+  it("password reset link: admin creates it, the member sets a new password once, old sessions end", async () => {
+    const admin = as(await login("admin@x.io"));
+    const pid = (await admin.post("/projects", { name: "P" })).json().id;
+    const budiId = (await prisma.user.findUniqueOrThrow({ where: { username: "budi" } })).id;
+    await prisma.member.create({ data: { projectId: pid, userId: budiId, role: "member" } });
+    const oldSession = as(await login("budi@x.io"));
+
+    const r = await admin.post(`/projects/${pid}/members/${budiId}/password-reset`);
+    expect(r.statusCode).toBe(201);
+    expect(r.json()).toMatchObject({ username: "budi" });
+    const token = r.json().link.split("/reset-password/")[1];
+    // Link baru membatalkan yang lama.
+    const token2 = (await admin.post(`/projects/${pid}/members/${budiId}/password-reset`)).json().link.split("/reset-password/")[1];
+    expect((await app.inject({ method: "GET", url: `/api/0/password-reset/${token}` })).statusCode).toBe(404);
+    expect((await app.inject({ method: "GET", url: `/api/0/password-reset/${token2}` })).json()).toEqual({ username: "budi" });
+
+    const reset = (password: string) => app.inject({ method: "POST", url: `/api/0/password-reset/${token2}`, payload: { password } });
+    expect((await reset("short")).statusCode).toBe(400);
+    const ok = await reset("budi-new-password");
+    expect(ok.statusCode).toBe(200);
+    expect(ok.cookies.some((c) => c.name === "bt_session")).toBe(true); // langsung login
+    expect((await reset("another-password-1")).statusCode).toBe(404); // sekali pakai
+    expect((await oldSession.get("/projects")).statusCode).toBe(401); // sesi lama berakhir
+
+    const bad = await app.inject({ method: "POST", url: "/api/0/auth/login", payload: { login: "budi", password: PW } });
+    expect(bad.statusCode).toBe(401);
+    const good = await app.inject({ method: "POST", url: "/api/0/auth/login", payload: { login: "budi", password: "budi-new-password" } });
+    expect(good.statusCode).toBe(200);
+  });
+
+  it("password reset link: a project admin cannot take over wider accounts", async () => {
+    const admin = as(await login("admin@x.io"));
+    const p1 = (await admin.post("/projects", { name: "P1" })).json().id;
+    const p2 = (await admin.post("/projects", { name: "P2" })).json().id;
+    const passwordHash = await hashPassword(PW);
+    const sari = await prisma.user.create({ data: { username: "sari", email: "sari@x.io", passwordHash } });
+    const budiId = (await prisma.user.findUniqueOrThrow({ where: { username: "budi" } })).id;
+    const adminId = (await prisma.user.findUniqueOrThrow({ where: { username: "admin" } })).id;
+    await prisma.member.createMany({ data: [
+      { projectId: p1, userId: sari.id, role: "admin" },   // sari: admin project P1 saja
+      { projectId: p1, userId: budiId, role: "member" },
+      { projectId: p2, userId: budiId, role: "member" },   // budi juga di P2 (bukan dikelola sari)
+    ] }); // admin global sudah member P1 (pembuat project)
+    const s = as(await login("sari@x.io"));
+    expect((await s.post(`/projects/${p1}/members/${budiId}/password-reset`)).statusCode).toBe(403);
+    expect((await s.post(`/projects/${p1}/members/${adminId}/password-reset`)).statusCode).toBe(403);
+    expect((await s.post(`/projects/${p1}/members/${sari.id}/password-reset`)).statusCode).toBe(400); // diri sendiri
+    await prisma.member.deleteMany({ where: { projectId: p2, userId: budiId } });
+    expect((await s.post(`/projects/${p1}/members/${budiId}/password-reset`)).statusCode).toBe(201); // kini hanya di P1
+    // Bukan admin project: 404.
+    const b = as(await login("budi@x.io"));
+    expect((await b.post(`/projects/${p1}/members/${sari.id}/password-reset`)).statusCode).toBe(404);
   });
 
   it("member cannot invite; last admin cannot be demoted", async () => {
@@ -248,7 +339,13 @@ describe("hapus & retensi", () => {
     expect((await budi.patch(`/projects/${pid}/settings`, { retentionDays: 7 })).statusCode).toBe(404);
     expect((await admin.patch(`/projects/${pid}/settings`, { retentionDays: 0 })).statusCode).toBe(400);
     expect((await admin.patch(`/projects/${pid}/settings`, { retentionDays: 7, retentionMaxEvents: 500 })).statusCode).toBe(200);
-    expect((await admin.get(`/projects/${pid}`)).json()).toMatchObject({ retentionDays: 7, retentionMaxEvents: 500 });
+    expect((await admin.get(`/projects/${pid}`)).json()).toMatchObject({ retentionDays: 7, retentionMaxEvents: 500, slowTraceMs: 1000 });
+    expect((await budi.patch(`/projects/${pid}/settings`, { slowTraceMs: 2000 })).statusCode).toBe(404);
+    for (const v of [49, 600_001, 1.5, "1000"]) expect((await admin.patch(`/projects/${pid}/settings`, { slowTraceMs: v })).statusCode).toBe(400);
+    expect((await admin.patch(`/projects/${pid}/settings`, { slowTraceMs: 2500 })).statusCode).toBe(200);
+    expect((await admin.get(`/projects/${pid}`)).json()).toMatchObject({ slowTraceMs: 2500, retentionDays: 7 });
+    expect((await admin.patch(`/projects/${pid}/settings`, { slowTraceMs: null })).statusCode).toBe(200);
+    expect((await admin.get(`/projects/${pid}`)).json()).toMatchObject({ slowTraceMs: null });
     const stats = (await admin.get(`/projects/${pid}/stats`)).json();
     expect(stats).toMatchObject({ events: 0, issues: 0 });
     expect(stats.dbSizeBytes).toBeGreaterThan(0);

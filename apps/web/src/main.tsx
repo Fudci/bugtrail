@@ -11,6 +11,12 @@ import { IssuesPage } from "./pages/Issues";
 import { LoginPage } from "./pages/Login";
 import { NewProjectPage } from "./pages/NewProject";
 import { OverviewPage } from "./pages/Overview";
+import { TracePage } from "./pages/Trace";
+import { TracesPage } from "./pages/Traces";
+import { HealthPage } from "./pages/Health";
+import { ServicesPage } from "./pages/Services";
+import { LogsPage } from "./pages/Logs";
+import { ResetPasswordPage } from "./pages/ResetPassword";
 import { ProjectsPage } from "./pages/Projects";
 import { ReleasesPage } from "./pages/Releases";
 import { SettingsPage } from "./pages/Settings";
@@ -29,6 +35,7 @@ const queryClient = new QueryClient({
 const router = createBrowserRouter([
   { path: "/login", element: <LoginPage /> },
   { path: "/invite/:token", element: <InvitePage /> },
+  { path: "/reset-password/:token", element: <ResetPasswordPage /> },
   {
     element: <RequireAuth />,
     children: [
@@ -41,6 +48,11 @@ const router = createBrowserRouter([
           { path: "p/:projectId", element: <OverviewPage /> },
           { path: "p/:projectId/issues", element: <IssuesPage /> },
           { path: "p/:projectId/issues/:issueId", element: <IssueDetailPage /> },
+          { path: "p/:projectId/health", element: <HealthPage /> },
+          { path: "p/:projectId/services", element: <ServicesPage /> },
+          { path: "p/:projectId/traces", element: <TracesPage /> },
+          { path: "p/:projectId/logs", element: <LogsPage /> },
+          { path: "p/:projectId/traces/:traceId", element: <TracePage /> },
           { path: "p/:projectId/releases", element: <ReleasesPage /> },
           { path: "p/:projectId/settings", element: <SettingsPage /> },
         ],

@@ -23,7 +23,7 @@ export async function sourcemapRoutes(app: FastifyInstance, { prisma }: { prisma
     return prisma.uploadToken.findMany({
       where: { projectId: pid },
       orderBy: { createdAt: "desc" },
-      select: { id: true, name: true, createdAt: true, lastUsedAt: true, createdBy: { select: { email: true } } },
+      select: { id: true, name: true, createdAt: true, lastUsedAt: true, createdBy: { select: { email: true, username: true } } },
     });
   });
 

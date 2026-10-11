@@ -1,5 +1,6 @@
 import type { PrismaClient } from "@bugtool/db";
 import { hashPassword } from "./password.js";
+import { usernameFromEmail } from "./users.js";
 
 export type BootstrapResult = "created" | "skipped-has-users" | "skipped-no-env";
 
@@ -17,6 +18,6 @@ export async function ensureFirstAdmin(
   if (!/^[^@\s]+@[^@\s]+$/.test(email)) throw new Error("ADMIN_EMAIL is not a valid email");
   if (password.length < 10) throw new Error("ADMIN_PASSWORD must be at least 10 characters");
 
-  await prisma.user.create({ data: { email, passwordHash: await hashPassword(password), isAdmin: true } });
+  await prisma.user.create({ data: { username: await usernameFromEmail(prisma, email), email, passwordHash: await hashPassword(password), isAdmin: true } });
   return "created";
 }

@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { ArrowRight, Lock, Mail } from "lucide-react";
+import { ArrowRight, Lock, User } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { useLocation, useNavigate } from "react-router";
 import { api, ApiError, type Me } from "../api";
@@ -12,7 +12,7 @@ export function LoginPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const qc = useQueryClient();
-  const [email, setEmail] = useState("");
+  const [login, setLogin] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -22,7 +22,7 @@ export function LoginPage() {
     setBusy(true);
     setError(null);
     try {
-      const me = await api.post<Me>("/auth/login", { email, password });
+      const me = await api.post<Me>("/auth/login", { login, password });
       qc.setQueryData(["me"], me);
       const from = (location.state as { from?: string } | null)?.from;
       navigate(from ?? "/", { replace: true });
@@ -43,7 +43,7 @@ export function LoginPage() {
         <form className="lg-form" onSubmit={submit}>
           <h1 style={{ fontSize: 46 }}>Welcome<br />back.</h1>
           <p className="sub" style={{ margin: "12px 0 28px" }}>Sign in to monitor your team's app errors.</p>
-          <label className="field"><Mail /><input type="email" required autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@company.com" /></label>
+          <label className="field"><User /><input required autoComplete="username" autoCapitalize="none" spellCheck={false} value={login} onChange={(e) => setLogin(e.target.value)} placeholder="Username or email" /></label>
           <label className="field"><Lock /><input type="password" required autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" /></label>
           {error && <p className="err-msg">{error}</p>}
           <button className="btn dark" style={{ width: "100%", height: 52, marginTop: 22 }} disabled={busy}>

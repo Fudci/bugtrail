@@ -109,7 +109,7 @@ describe("validasi webhook", () => {
   it("API: simpan, samarkan URL, tolak URL non-Discord, admin saja", async () => {
     await prisma.user.deleteMany();
     const passwordHash = await hashPassword("password-123");
-    await prisma.user.create({ data: { email: "root@x.io", passwordHash, isAdmin: true } });
+    await prisma.user.create({ data: { username: "root", email: "root@x.io", passwordHash, isAdmin: true } });
     const app = await buildApp({ prisma, store, alerter });
     const login = await app.inject({ method: "POST", url: "/api/0/auth/login", payload: { email: "root@x.io", password: "password-123" } });
     const cookie = `bt_session=${login.cookies.find((c) => c.name === "bt_session")!.value}`;

@@ -6,7 +6,10 @@ import type { PrismaClient } from "@bugtool/db";
 import { projectRole, requireUser } from "../auth/session.js";
 import { hashToken, newToken } from "../auth/tokens.js";
 import { keyCache } from "../ingest/key-cache.js";
+import { slowCache } from "../otlp/slow-config.js";
+import type { TelemetryStore } from "../otlp/telemetry-store.js";
 import { DISCORD_WEBHOOK_RE, type Alerter } from "../process/alerts.js";
+import type { QuotaMeter } from "../process/quota.js";
 
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const publicUrl = () => new URL(process.env["PUBLIC_URL"] ?? `http://localhost:${process.env["API_PORT"] ?? 4000}`);
@@ -24,7 +27,11 @@ const createBody = z.object({
   name: z.string().trim().min(1).max(100),
   platform: z.string().trim().max(50).optional(),
 });
-const inviteBody = z.object({ email: z.email().toLowerCase(), role: z.enum(["admin", "member", "viewer"]).default("member") });
+// Email opsional: tanpa email, undangan adalah link biasa (sekali pakai) dan orang yang diundang memilih username sendiri.
+const inviteBody = z.object({
+  email: z.union([z.literal(""), z.email().toLowerCase()]).optional(),
+  role: z.enum(["admin", "member", "viewer"]).default("member"),
+});
 const memberParams = z.object({ id: z.uuid(), userId: z.uuid() });
 const roleBody = z.object({ role: z.enum(["admin", "member", "viewer"]) });
 
@@ -34,7 +41,21 @@ const slugify = (s: string) =>
 const settingsBody = z.object({
   retentionMaxEvents: z.number().int().min(100).max(10_000_000).optional(),
   retentionDays: z.number().int().min(1).max(3650).optional(),
+  // Ambang trace lambat mode Lite (ms); null = mati.
+  slowTraceMs: z.number().int().min(50).max(600_000).nullable().optional(),
+  // Kuota per menit; null = tanpa batas.
+  quotaEventsPerMin: z.number().int().min(1).max(10_000_000).nullable().optional(),
+  quotaSpansPerMin: z.number().int().min(1).max(10_000_000).nullable().optional(),
+  quotaLogsPerMin: z.number().int().min(1).max(10_000_000).nullable().optional(),
 });
+
+/** Total data yang dibuang karena kuota dalam ~1 jam terakhir (jam berjalan + jam sebelumnya). */
+async function droppedLastHour(prisma: PrismaClient, projectId: string, nowMs = Date.now()) {
+  const since = Math.floor((nowMs - 3_600_000) / 3_600_000) * 3600;
+  const [r] = await prisma.$queryRaw<{ events: bigint | number | null; spans: bigint | number | null; logs: bigint | number | null }[]>`
+    SELECT SUM(events) AS events, SUM(spans) AS spans, SUM(logs) AS logs FROM quota_drops WHERE project_id = ${projectId} AND hour >= ${since}`;
+  return { events: Number(r?.events ?? 0), spans: Number(r?.spans ?? 0), logs: Number(r?.logs ?? 0) };
+}
 
 function dbSizeBytes(dbPath: string | undefined) {
   if (!dbPath) return null;
@@ -54,6 +75,9 @@ const alertsBody = z.object({
   alertRegression: z.boolean().optional(),
   alertSpikeThreshold: z.number().int().min(1).max(1_000_000).nullable().optional(),
   alertSpikeMinutes: z.number().int().min(1).max(1440).optional(),
+  // Ongoing errors: interval ringkasan per issue (detik); null = mati.
+  alertOngoingSeconds: z.union([z.literal(30), z.literal(60), z.literal(300), z.literal(900)]).nullable().optional(),
+  alertOngoingBackoff: z.boolean().optional(),
 });
 
 // URL webhook = kredensial (siapa pun yang tahu bisa kirim pesan ke channel). Jangan kirim utuh ke browser.
@@ -61,7 +85,10 @@ const maskWebhook = (url: string | null) => (url ? url.replace(/\/[\w-]+$/, (t) 
 
 export async function projectRoutes(
   app: FastifyInstance,
-  { prisma, dbPath, alerter }: { prisma: PrismaClient; dbPath?: string | undefined; alerter?: Alerter | undefined },
+  { prisma, dbPath, alerter, telemetry, quota }: {
+    prisma: PrismaClient; dbPath?: string | undefined; alerter?: Alerter | undefined; quota?: QuotaMeter | undefined;
+    telemetry?: Pick<TelemetryStore, "kind" | "storesAllSpans"> | undefined;
+  },
 ) {
   app.addHook("preHandler", requireUser);
 
@@ -148,14 +175,24 @@ export async function projectRoutes(
       role,
       // Viewer tidak perlu DSN.
       dsnKeys: role === "viewer" ? [] : project.dsnKeys.map((k) => ({ id: k.id, label: k.label, dsn: dsnFor(k.publicKey, project.publicId!) })),
+      // Mode penyimpanan trace OpenTelemetry (Lite: SQLite, hanya trace error; Scale: ClickHouse, semua).
+      traceStorage: telemetry ? { kind: telemetry.kind, allSpans: telemetry.storesAllSpans } : null,
       retentionMaxEvents: project.retentionMaxEvents,
       retentionDays: project.retentionDays,
+      slowTraceMs: project.slowTraceMs,
+      quotaEventsPerMin: project.quotaEventsPerMin,
+      quotaSpansPerMin: project.quotaSpansPerMin,
+      quotaLogsPerMin: project.quotaLogsPerMin,
+      // Banner "over quota" di Overview/API Health (semua anggota).
+      overQuota: await droppedLastHour(prisma, project.id).then((d) => d.events + d.spans + d.logs > 0),
       alerts: role === "admin" ? {
         discordWebhook: maskWebhook(project.discordWebhookUrl),
         newIssue: project.alertNewIssue,
         regression: project.alertRegression,
         spikeThreshold: project.alertSpikeThreshold,
         spikeMinutes: project.alertSpikeMinutes,
+        ongoingSeconds: project.alertOngoingSeconds,
+        ongoingBackoff: project.alertOngoingBackoff,
       } : null,
     };
   });
@@ -178,10 +215,53 @@ export async function projectRoutes(
     if (!p.success) return reply.code(404).send({ detail: "not found" });
     if ((await projectRole(prisma, req.user!, p.data.id, "admin")) !== "admin") return reply.code(404).send({ detail: "not found" });
     const body = settingsBody.safeParse(req.body);
-    if (!body.success) return reply.code(400).send({ detail: "retention: 100–10,000,000 events, 1–3650 days" });
+    if (!body.success) return reply.code(400).send({ detail: "retention: 100–10,000,000 events, 1–3650 days; slow traces: 50–600,000 ms; quotas: 1–10,000,000 per minute or unlimited" });
     const data = Object.fromEntries(Object.entries(body.data).filter(([, v]) => v !== undefined));
     await prisma.project.update({ where: { id: p.data.id }, data });
+    slowCache.delete(p.data.id); // ingest langsung memakai ambang baru
+    quota?.invalidate(p.data.id);
     return { ok: true };
+  });
+
+  // Pemakaian 24 jam terakhir per jam: event tersimpan (tabel events), span diterima (span_usage),
+  // dan yang dibuang karena kuota (quota_drops), plus hitungan menit berjalan.
+  app.get("/projects/:id/usage", async (req, reply) => {
+    const p = idParam.safeParse(req.params);
+    if (!p.success) return reply.code(404).send({ detail: "not found" });
+    if (!(await projectRole(prisma, req.user!, p.data.id))) return reply.code(404).send({ detail: "not found" });
+    const pid = p.data.id;
+    const nowMs = Date.now();
+    const end = Math.floor(nowMs / 3_600_000) * 3600;
+    const start = end - 23 * 3600;
+    const since = new Date(start * 1000).toISOString().replace("Z", "+00:00");
+    type N = bigint | number | null;
+    const [events, spans, drops, project] = await Promise.all([
+      prisma.$queryRaw<{ h: N; n: N }[]>`
+        SELECT CAST(strftime('%s', substr(received_at, 1, 13) || ':00:00') AS INTEGER) AS h, COUNT(*) AS n
+        FROM events WHERE project_id = ${pid} AND received_at >= ${since} GROUP BY h`,
+      prisma.$queryRaw<{ h: N; n: N }[]>`SELECT hour AS h, spans AS n FROM span_usage WHERE project_id = ${pid} AND hour >= ${start}`,
+      prisma.$queryRaw<{ h: N; e: N; s: N; l: N }[]>`SELECT hour AS h, events AS e, spans AS s, logs AS l FROM quota_drops WHERE project_id = ${pid} AND hour >= ${start}`,
+      prisma.project.findUniqueOrThrow({ where: { id: pid }, select: { quotaEventsPerMin: true, quotaSpansPerMin: true, quotaLogsPerMin: true } }),
+    ]);
+    const hours = Array.from({ length: 24 }, (_, i) => ({ hour: start + i * 3600, events: 0, spans: 0, droppedEvents: 0, droppedSpans: 0, droppedLogs: 0 }));
+    const at = (h: N) => hours[(Number(h) - start) / 3600];
+    for (const r of events) { const x = at(r.h); if (x) x.events = Number(r.n); }
+    for (const r of spans) { const x = at(r.h); if (x) x.spans = Number(r.n); }
+    for (const r of drops) { const x = at(r.h); if (x) { x.droppedEvents = Number(r.e); x.droppedSpans = Number(r.s); x.droppedLogs = Number(r.l); } }
+    return {
+      hours,
+      quotaEventsPerMin: project.quotaEventsPerMin,
+      quotaSpansPerMin: project.quotaSpansPerMin,
+      quotaLogsPerMin: project.quotaLogsPerMin,
+      currentMinute: quota?.current(pid) ?? { events: 0, spans: 0, logs: 0 },
+      totals: {
+        events: hours.reduce((n, h) => n + h.events, 0),
+        spans: hours.reduce((n, h) => n + h.spans, 0),
+        droppedEvents: hours.reduce((n, h) => n + h.droppedEvents, 0),
+        droppedSpans: hours.reduce((n, h) => n + h.droppedSpans, 0),
+        droppedLogs: hours.reduce((n, h) => n + h.droppedLogs, 0),
+      },
+    };
   });
 
   app.patch("/projects/:id/alerts", async (req, reply) => {
@@ -235,7 +315,7 @@ export async function projectRoutes(
     const members = await prisma.member.findMany({
       where: { projectId: p.data.id },
       orderBy: { createdAt: "asc" },
-      include: { user: { select: { id: true, email: true, name: true } } },
+      include: { user: { select: { id: true, username: true, email: true, name: true } } },
     });
     const invites =
       role === "admin"
@@ -256,15 +336,17 @@ export async function projectRoutes(
     }
     const body = inviteBody.safeParse(req.body);
     if (!body.success) return reply.code(400).send({ detail: "invalid email" });
+    const email = body.data.email || null;
 
-    const already = await prisma.member.count({ where: { projectId: p.data.id, user: { email: body.data.email } } });
-    if (already) return reply.code(409).send({ detail: "already a member" });
+    if (email && (await prisma.member.count({ where: { projectId: p.data.id, user: { email } } }))) {
+      return reply.code(409).send({ detail: "already a member" });
+    }
 
     const token = newToken();
     const invite = await prisma.invite.create({
       data: {
         projectId: p.data.id,
-        email: body.data.email,
+        email,
         role: body.data.role,
         tokenHash: hashToken(token),
         invitedById: req.user!.id,

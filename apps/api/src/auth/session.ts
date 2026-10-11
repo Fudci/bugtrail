@@ -8,7 +8,8 @@ const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 export interface AuthUser {
   id: string;
-  email: string;
+  username: string;
+  email: string | null;
   name: string | null;
   isAdmin: boolean;
 }
@@ -48,7 +49,7 @@ export const sessionPlugin = fp(async (app: FastifyInstance, opts: { prisma: Pri
     if (!token) return;
     const session = await opts.prisma.session.findUnique({
       where: { id: hashToken(token) },
-      include: { user: { select: { id: true, email: true, name: true, isAdmin: true } } },
+      include: { user: { select: { id: true, username: true, email: true, name: true, isAdmin: true } } },
     });
     if (!session) return;
     if (session.expiresAt < new Date()) {

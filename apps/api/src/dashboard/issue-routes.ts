@@ -3,6 +3,7 @@ import { z } from "zod";
 import { Prisma, toDbDate, type PrismaClient } from "@bugtool/db";
 import { projectRole, requireUser } from "../auth/session.js";
 import { toCsv } from "./csv.js";
+import { traceView, type TelemetryStore } from "../otlp/telemetry-store.js";
 import { unsymbolicatedDebugIds, type Symbolicator } from "../sourcemaps/symbolicate.js";
 
 const idParam = z.object({ id: z.uuid() });
@@ -86,7 +87,7 @@ async function sparklines(prisma: PrismaClient, ids: string[]) {
 
 export async function issueRoutes(
   app: FastifyInstance,
-  { prisma, symbolicator }: { prisma: PrismaClient; symbolicator?: Symbolicator | undefined },
+  { prisma, symbolicator, telemetry }: { prisma: PrismaClient; symbolicator?: Symbolicator | undefined; telemetry?: TelemetryStore | undefined },
 ) {
   app.addHook("preHandler", requireUser);
 
@@ -110,7 +111,7 @@ export async function issueRoutes(
       },
       orderBy: [{ lastSeen: "desc" }, { id: "desc" }],
       take: limit + 1,
-      include: { assignee: { select: { id: true, name: true, email: true } } },
+      include: { assignee: { select: { id: true, username: true, name: true, email: true } } },
     });
 
     const page = rows.slice(0, limit);
@@ -133,7 +134,7 @@ export async function issueRoutes(
       where: await issueFilter(prisma, p.data.id, q.data),
       orderBy: [{ lastSeen: "desc" }, { id: "desc" }],
       take: EXPORT_MAX,
-      include: { assignee: { select: { email: true } } },
+      include: { assignee: { select: { email: true, username: true } } },
     });
     // Jumlah user unik per issue dalam satu query, bukan satu query per baris.
     const users = new Map<string, number>();
@@ -149,7 +150,7 @@ export async function issueRoutes(
       ["id", "title", "culprit", "level", "status", "events", "users", "first_seen", "last_seen", "first_release", "assignee", "url"],
       issues.map((i) => [
         i.id, i.title, i.culprit, i.level, i.status, i.eventCount, users.get(i.id) ?? 0,
-        i.firstSeen, i.lastSeen, i.firstRelease, i.assignee?.email, `${web}/p/${p.data.id}/issues/${i.id}`,
+        i.firstSeen, i.lastSeen, i.firstRelease, i.assignee ? (i.assignee.email ?? i.assignee.username) : undefined, `${web}/p/${p.data.id}/issues/${i.id}`,
       ]),
     );
     const date = new Date().toISOString().slice(0, 10);
@@ -223,6 +224,17 @@ export async function issueRoutes(
     const row = e.success ? await prisma.event.findFirst({ where: { id: e.data.eventId.toLowerCase(), issueId: issue.id } }) : null;
     if (!row) return reply.code(404).send({ detail: "event not found (it may have been removed by retention)" });
     return viewEvent(issue.projectId, row);
+  });
+
+  // Trace OpenTelemetry dari event issue ini (hanya trace yang berisi error yang disimpan).
+  app.get("/issues/:id/trace/:traceId", async (req, reply) => {
+    const issue = await loadIssue(prisma, req, reply);
+    if (!issue) return;
+    const t = z.object({ traceId: z.string().regex(/^[0-9a-f]{32}$/) }).safeParse(req.params);
+    if (!t.success) return reply.code(400).send({ detail: "invalid trace id" });
+    const spans = (await telemetry?.getTrace(issue.projectId, t.data.traceId)) ?? [];
+    if (!spans.length) return reply.code(404).send({ detail: "trace not stored (it may have been removed by retention)" });
+    return traceView(t.data.traceId, spans);
   });
 
   // User terdampak: per user ID, jumlah event & event terakhirnya (dari event yang masih tersimpan).
@@ -318,7 +330,7 @@ export async function issueRoutes(
     if (!body.success) return reply.code(400).send({ detail: "invalid body" });
 
     if (body.data.assigneeId) {
-      const assignee = await prisma.user.findUnique({ where: { id: body.data.assigneeId }, select: { id: true, email: true, name: true, isAdmin: true } });
+      const assignee = await prisma.user.findUnique({ where: { id: body.data.assigneeId }, select: { id: true, username: true, email: true, name: true, isAdmin: true } });
       if (!assignee || !(await projectRole(prisma, assignee, issue.projectId))) {
         return reply.code(400).send({ detail: "assignee must be a project member" });
       }
@@ -345,7 +357,7 @@ async function loadIssue(
   const issue = p.success
     ? await prisma.issue.findUnique({
         where: { id: p.data.id },
-        include: { assignee: { select: { id: true, name: true, email: true } } },
+        include: { assignee: { select: { id: true, username: true, name: true, email: true } } },
       })
     : null;
   const role = issue && (await projectRole(prisma, req.user!, issue.projectId, min));
@@ -358,7 +370,7 @@ async function loadIssue(
 
 type IssueWithAssignee = {
   id: string; title: string; culprit: string | null; level: string; status: string; eventCount: number;
-  firstSeen: Date; lastSeen: Date; assignee: { id: string; name: string | null; email: string } | null;
+  firstSeen: Date; lastSeen: Date; assignee: { id: string; username: string; name: string | null; email: string | null } | null;
 };
 
 function toIssue(r: IssueWithAssignee) {

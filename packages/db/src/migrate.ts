@@ -27,10 +27,23 @@ export function migrate(dbPath: string, migrationsDir = process.env["MIGRATIONS_
       .sort();
     for (const name of pending) {
       const sql = readFileSync(join(migrationsDir, name, "migration.sql"), "utf8");
-      db.transaction(() => {
-        db.exec(sql);
-        db.prepare("INSERT INTO _bugtool_migrations (name) VALUES (?)").run(name);
-      })();
+      // Membuat ulang tabel yang dirujuk tabel lain (mis. users) harus dengan foreign key mati, kalau tidak
+      // DROP TABLE ikut menghapus baris anak (ON DELETE CASCADE). PRAGMA ini tidak berlaku di dalam transaksi,
+      // jadi diset di luar, lalu integritas dicek sebelum commit (https://www.sqlite.org/lang_altertable.html).
+      const fkOff = sql.startsWith("-- bugtool:foreign-keys-off");
+      if (fkOff) db.pragma("foreign_keys = OFF");
+      try {
+        db.transaction(() => {
+          db.exec(sql);
+          if (fkOff) {
+            const bad = db.pragma("foreign_key_check") as unknown[];
+            if (bad.length) throw new Error(`migration ${name} broke ${bad.length} foreign key references`);
+          }
+          db.prepare("INSERT INTO _bugtool_migrations (name) VALUES (?)").run(name);
+        })();
+      } finally {
+        if (fkOff) db.pragma("foreign_keys = ON");
+      }
     }
     return pending;
   } finally {

@@ -67,7 +67,7 @@ export class Alerter {
   private markSpike;
 
   constructor(
-    private db: RawDb,
+    db: RawDb,
     private opts: { webUrl: string; send?: Sender; log?: (msg: string, err?: unknown) => void },
   ) {
     this.cfg = db.prepare<[string], ProjectAlertCfg>(`SELECT id, name, discord_webhook_url AS webhook,
@@ -156,6 +156,21 @@ export class Alerter {
     };
   }
 
+  /** Antrikan pesan dari pemeriksa lain (mis. API Health). */
+  notify(url: string, msg: DiscordMessage) {
+    this.enqueue(url, msg);
+  }
+
+  settingsUrl(projectId: string) {
+    return `${this.opts.webUrl.replace(/\/$/, "")}/p/${projectId}/settings`;
+  }
+
+  /** Halaman API Health; query opsional (mis. method/route/status) untuk membuka endpoint yang di-alert. */
+  healthUrl(projectId: string, query?: Record<string, string>) {
+    const q = query && Object.keys(query).length ? `?${new URLSearchParams(query)}` : "";
+    return `${this.opts.webUrl.replace(/\/$/, "")}/p/${projectId}/health${q}`;
+  }
+
   private enqueue(url: string, msg: DiscordMessage) {
     if (this.queue.length >= MAX_QUEUE) {
       this.dropped++;
@@ -194,6 +209,11 @@ export class Alerter {
     return this.send(url, {
       embeds: [{ title: "BugTrail test alert ✅", description: `Webhook for project **${clip(projectName, 100)}** is working.`, color: COLORS.info, footer: { text: "BugTrail" } }],
     });
+  }
+
+  /** Kirim satu pesan langsung, tanpa antrian (tombol "Send test" aturan alert). */
+  async sendNow(url: string, msg: DiscordMessage) {
+    return this.send(url, msg);
   }
 
   /** Tunggu antrian kirim kosong (test). */

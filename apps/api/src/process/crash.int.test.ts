@@ -19,7 +19,7 @@ let proc: ChildProcess | null = null;
 function startServer() {
   proc = spawn(process.execPath, ["--import", "tsx", join(root, "apps/api/src/index.ts")], {
     cwd: join(root, "apps/api"),
-    env: { ...process.env, DATABASE_URL: `file:${dbFile}`, API_PORT: String(PORT), LOG_LEVEL: "error",
+    env: { ...process.env, DATABASE_URL: `file:${dbFile}`, API_PORT: String(PORT), LOG_LEVEL: "error", OTLP_GRPC_PORT: "0",
       MIGRATIONS_DIR: join(root, "packages/db/prisma/migrations") },
     stdio: "ignore",
   });

@@ -55,7 +55,7 @@ function statements(db: RawDb) {
       (id, project_id, issue_id, received_at, timestamp, level, release, environment, user_id, payload)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
     insertFts: db.prepare("INSERT INTO events_fts (content, event_id, issue_id, project_id) VALUES (?, ?, ?, ?)"),
-    deleteQueued: db.prepare("DELETE FROM ingest_queue WHERE id <= ?"),
+    deleteQueued: db.prepare("DELETE FROM ingest_queue WHERE id = ?"),
   };
 }
 
@@ -64,7 +64,7 @@ const cache = new WeakMap<RawDb, ReturnType<typeof statements>>();
 /**
  * Simpan batch dari antrian dan hapus barisnya dari ingest_queue dalam SATU transaksi sinkron.
  * Crash di titik mana pun: transaksi batal, baris antrian tetap ada, diproses ulang saat start.
- * Batch harus berisi baris antrian berurutan dari id terkecil (lihat store.ts).
+ * Baris antrian dihapus per id (batch boleh tidak berurutan: antrian adil per project, lihat store.ts).
  */
 export function persistBatch(db: RawDb, jobs: QueuedJob[], symbolicator?: Symbolicator): BatchResult {
   const st = cache.get(db) ?? statements(db);
@@ -98,8 +98,6 @@ export function persistBatch(db: RawDb, jobs: QueuedJob[], symbolicator?: Symbol
       result.invalid++;
     }
   }
-
-  const maxQueueId = Math.max(...jobs.map((j) => j.queueId));
 
   db.transaction(() => {
     // Kelompokkan per issue supaya tiap issue cukup diproses sekali per batch.
@@ -153,7 +151,7 @@ export function persistBatch(db: RawDb, jobs: QueuedJob[], symbolicator?: Symbol
       result.created += group.length;
     }
 
-    st.deleteQueued.run(maxQueueId);
+    for (const j of jobs) st.deleteQueued.run(j.queueId);
   })();
 
   return result;

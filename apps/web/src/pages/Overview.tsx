@@ -1,7 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 import { Activity, ArrowUpRight, Bug, Download, Users, X } from "lucide-react";
 import { useNavigate, useParams, useSearchParams } from "react-router";
+import { QuotaBanner } from "../components/QuotaBanner";
 import { api, type IssueStatus, type Level } from "../api";
+import { RangeTabs, rangeLabel, readRange, type RangeOption } from "../components/RangeTabs";
 
 interface Totals { events: number; users: number; newIssues: number }
 interface OverviewData {
@@ -15,7 +17,7 @@ interface OverviewData {
   environments: string[];
 }
 type Range = "24h" | "7d" | "14d" | "30d";
-const RANGES: { key: Range; label: string }[] = [
+const RANGES: RangeOption<Range>[] = [
   { key: "24h", label: "24 hours" }, { key: "7d", label: "7 days" }, { key: "14d", label: "14 days" }, { key: "30d", label: "30 days" },
 ];
 const LEVEL_STYLE: Record<Level, string> = { error: "p-dark", fatal: "p-out", warning: "p-acc", info: "p-hatch", debug: "p-hatch" };
@@ -42,7 +44,8 @@ export function OverviewPage() {
   const { projectId } = useParams();
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
-  const range = (params.get("range") as Range | null) ?? "14d";
+  // Nilai ?range= tak dikenal kembali ke 14 hari (sebelumnya diteruskan ke API dan dibalas 400).
+  const range = readRange(params.get("range"), RANGES, "14d");
   const release = params.get("release") ?? "";
   const environment = params.get("environment") ?? "";
   const level = params.get("level") ?? "";
@@ -90,10 +93,11 @@ export function OverviewPage() {
 
   return (
     <section>
+      <QuotaBanner />
       <div className="hero" style={{ alignItems: "flex-start", flexWrap: "wrap" }}>
         <div>
           <h1>Overview</h1>
-          <p className="sub" style={{ marginTop: 8 }}>Errors in the last {RANGES.find((r) => r.key === range)?.label}. Counts reflect events still retained.</p>
+          <p className="sub" style={{ marginTop: 8 }}>Errors in the last {rangeLabel(RANGES, range)}. Counts reflect events still retained.</p>
           {d && levelTotal > 0 && (
             <div style={{ marginTop: 24, maxWidth: 680 }}>
               <div className="seg-hint">
@@ -129,11 +133,7 @@ export function OverviewPage() {
       </div>
 
       <div className="row" style={{ marginBottom: "var(--s5)", flexWrap: "wrap" }}>
-        <div className="ptabs">
-          {RANGES.map((r) => (
-            <a key={r.key} className={range === r.key ? "on" : ""} onClick={() => setParam("range", r.key === "14d" ? "" : r.key)}>{r.label}</a>
-          ))}
-        </div>
+        <RangeTabs ranges={RANGES} value={range} onPick={(k) => setParam("range", k === "14d" ? "" : k)} />
         <select className="select" value={release} onChange={(e) => setParam("release", e.target.value)}>
           <option value="">All releases</option>
           {d?.releases.map((r) => <option key={r} value={r}>{r}</option>)}

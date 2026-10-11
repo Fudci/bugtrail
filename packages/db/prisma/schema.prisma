@@ -39,7 +39,8 @@ model Organization {
 
 model User {
   id           String    @id @default(uuid())
-  email        String    @unique
+  username     String    @unique // login; huruf kecil
+  email        String?   @unique // opsional
   name         String?
   passwordHash String?   @map("password_hash")
   isAdmin      Boolean   @default(false) @map("is_admin")
@@ -80,6 +81,15 @@ model Project {
   alertSpikeThreshold Int?     @map("alert_spike_threshold")
   alertSpikeMinutes   Int      @default(5) @map("alert_spike_minutes")
   lastSpikeAlertAt    String?  @map("last_spike_alert_at")
+  alert5xxPct         Float?   @map("alert_5xx_pct")
+  alert5xxMinutes     Int      @default(5) @map("alert_5xx_minutes")
+  alert5xxMinRequests Int      @default(20) @map("alert_5xx_min_requests")
+  alertOngoingSeconds Int?     @map("alert_ongoing_seconds") // null = mati
+  alertOngoingBackoff Boolean  @default(true) @map("alert_ongoing_backoff")
+  slowTraceMs         Int?     @default(1000) @map("slow_trace_ms") // Lite: simpan trace lambat (ms); null = mati
+  quotaEventsPerMin   Int?     @default(6000) @map("quota_events_per_min") // null = tanpa batas
+  quotaSpansPerMin    Int?     @default(600000) @map("quota_spans_per_min") // null = tanpa batas
+  quotaLogsPerMin     Int?     @default(6000) @map("quota_logs_per_min") // null = tanpa batas
   createdAt      DateTime     @default(now()) @map("created_at")
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   members        Member[]
@@ -88,6 +98,7 @@ model Project {
   events         Event[]
   invites        Invite[]
   uploadTokens   UploadToken[]
+  traceSpans     TraceSpan[]
   artifacts      Artifact[]
 
   @@unique([organizationId, slug])
@@ -165,7 +176,7 @@ model Session {
 model Invite {
   id          String    @id @default(uuid())
   projectId   String    @map("project_id")
-  email       String
+  email       String? // opsional: undangan cukup link
   role        Role      @default(member)
   tokenHash   String    @unique @map("token_hash")
   invitedById String    @map("invited_by_id")
@@ -209,4 +220,29 @@ model Artifact {
   @@unique([projectId, debugId, fileType])
   @@index([sha1])
   @@map("artifacts")
+}
+
+// Span OpenTelemetry dari trace yang berisi error (lihat migrasi 20261005000000_trace_spans).
+model TraceSpan {
+  projectId     String   @map("project_id")
+  traceId       String   @map("trace_id")
+  spanId        String   @map("span_id")
+  parentSpanId  String?  @map("parent_span_id")
+  service       String?
+  name          String
+  kind          Int      @default(0)
+  startUs       BigInt   @map("start_us")
+  durationUs    BigInt   @map("duration_us")
+  statusCode    Int      @default(0) @map("status_code")
+  statusMessage String?  @map("status_message")
+  attributes    String   @default("{}")
+  events        String   @default("[]")
+  resource      String   @default("{}")
+  receivedAt    DateTime @default(now()) @map("received_at")
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@id([projectId, traceId, spanId])
+  @@index([projectId, receivedAt])
+  @@index([projectId, kind, startUs])
+  @@map("trace_spans")
 }

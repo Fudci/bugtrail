@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Search, UserMinus, UserPlus } from "lucide-react";
 import { useState } from "react";
 import { api, type Member, type Person } from "../api";
-import { initial, useMe } from "../hooks";
+import { initial, personName, useMe } from "../hooks";
 import { Popover } from "./Popover";
 
 // Tombol assignee di daftar issue: kosong = ikon "assign", terisi = avatar; klik untuk pilih anggota.
@@ -24,9 +24,9 @@ export function AssigneePicker({ issueId, projectId, assignee, canEdit }: { issu
     },
   });
 
-  const label = assignee ? `Assigned to ${assignee.name ?? assignee.email}` : "Unassigned";
+  const label = assignee ? `Assigned to ${personName(assignee)}` : "Unassigned";
   const face = assignee
-    ? <span className="who">{initial(assignee.name ?? assignee.email)}</span>
+    ? <span className="who">{initial(personName(assignee))}</span>
     : <span className="who assign"><UserPlus /></span>;
   if (!canEdit) return <span title={label}>{face}</span>;
 
@@ -41,14 +41,14 @@ export function AssigneePicker({ issueId, projectId, assignee, canEdit }: { issu
         {(close) => {
           const pick = (id: string | null) => { assign.mutate(id); close(); setFind(""); };
           const q = find.trim().toLowerCase();
-          const list = (members.data?.members ?? []).filter((m) => !q || m.email.toLowerCase().includes(q) || (m.name ?? "").toLowerCase().includes(q));
+          const list = (members.data?.members ?? []).filter((m) => !q || m.username.includes(q) || (m.email ?? "").toLowerCase().includes(q) || (m.name ?? "").toLowerCase().includes(q));
           return (
             <>
               <div className="cap">Assign to</div>
               {me && assignee?.id !== me.id && !q && <a onClick={() => pick(me.id)}><UserPlus />Assign to me</a>}
               {(members.data?.members.length ?? 0) > 5 && (
                 <label className="pop-search"><Search />
-                  <input autoFocus value={find} onChange={(e) => setFind(e.target.value)} placeholder="Search name or email…"
+                  <input autoFocus value={find} onChange={(e) => setFind(e.target.value)} placeholder="Search name or username…"
                     onKeyDown={(e) => { if (e.key === "Enter" && list[0]) pick(list[0].id); }} />
                 </label>
               )}
@@ -57,10 +57,10 @@ export function AssigneePicker({ issueId, projectId, assignee, canEdit }: { issu
               <div className="pop-list">
               {list.map((m) => (
                 <a key={m.id} onClick={() => pick(m.id)}>
-                  <span className="who" style={{ width: 22, height: 22, fontSize: 10 }}>{initial(m.name ?? m.email)}</span>
+                  <span className="who" style={{ width: 22, height: 22, fontSize: 10 }}>{initial(personName(m))}</span>
                   <span style={{ minWidth: 0, display: "flex", flexDirection: "column" }}>
-                    <span className="ellip">{m.name ?? m.email}</span>
-                    {m.name && <span className="ellip" style={{ fontSize: 11.5, color: "var(--mute)" }}>{m.email}</span>}
+                    <span className="ellip">{personName(m)}</span>
+                    {m.name && <span className="ellip" style={{ fontSize: 11.5, color: "var(--mute)" }}>@{m.username}</span>}
                   </span>
                   {assignee?.id === m.id && <Check style={{ marginLeft: "auto" }} />}
                 </a>

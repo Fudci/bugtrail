@@ -38,7 +38,7 @@ COPY --from=build /src/packages/db/prisma/migrations ./migrations
 RUN mkdir -p /data && chown node:node /data
 USER node
 VOLUME /data
-EXPOSE 4000
+EXPOSE 4000 4317
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
   CMD node -e "fetch('http://127.0.0.1:'+process.env.API_PORT+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 CMD ["node", "server.js"]

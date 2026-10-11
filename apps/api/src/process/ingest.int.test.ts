@@ -139,7 +139,7 @@ describe("releases", () => {
     await drain();
 
     const passwordHash = await hashPassword("password-123");
-    const user = await prisma.user.create({ data: { email: `r${Date.now()}@x.io`, passwordHash, isAdmin: true } });
+    const user = await prisma.user.create({ data: { username: `r${Date.now()}`, email: `r${Date.now()}@x.io`, passwordHash, isAdmin: true } });
     const login = await app.inject({ method: "POST", url: "/api/0/auth/login", payload: { email: user.email, password: "password-123" } });
     const cookie = `bt_session=${login.cookies.find((c) => c.name === "bt_session")!.value}`;
 
@@ -170,7 +170,7 @@ describe("user terdampak & event per user", () => {
     await drain();
 
     const passwordHash = await hashPassword("password-123");
-    const user = await prisma.user.create({ data: { email: `u${Date.now()}@x.io`, passwordHash, isAdmin: true } });
+    const user = await prisma.user.create({ data: { username: `u${Date.now()}`, email: `u${Date.now()}@x.io`, passwordHash, isAdmin: true } });
     const login = await app.inject({ method: "POST", url: "/api/0/auth/login", payload: { email: user.email, password: "password-123" } });
     const cookie = `bt_session=${login.cookies.find((c) => c.name === "bt_session")!.value}`;
     const get = (u: string) => app.inject({ method: "GET", url: `/api/0${u}`, headers: { cookie } });

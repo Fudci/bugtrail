@@ -5,6 +5,7 @@ import { useNavigate, useParams, useSearchParams } from "react-router";
 import { api, type IssueSummary } from "../api";
 import { AssigneePicker } from "../components/AssigneePicker";
 import { formatDate, timeAgo, useProject } from "../hooks";
+import { Spark } from "../components/Spark";
 
 const TABS = [
   { key: "unresolved", label: "Unresolved" },
@@ -147,7 +148,7 @@ export function IssuesPage() {
             </div>
             <span><span className={`tag ${i.level === "error" || i.level === "fatal" ? "err" : ""}`}>{i.level}</span></span>
             <span><div className="k">{formatDate(i.lastSeen)}</div><div>{timeAgo(i.lastSeen)}</div></span>
-            <Spark data={i.spark} />
+            <Spark data={i.spark} title={(n) => `${n.toLocaleString("en-US")} events in 14 days`} />
             <span className="v num">{i.eventCount.toLocaleString("en-US")}</span>
             <AssigneePicker issueId={i.id} projectId={projectId!} assignee={i.assignee} canEdit={canAssign} />
           </div>
@@ -161,15 +162,5 @@ export function IssuesPage() {
         </div>
       )}
     </section>
-  );
-}
-
-function Spark({ data }: { data?: number[] }) {
-  if (!data) return <span />;
-  const max = Math.max(1, ...data);
-  return (
-    <span className="spark" title={`${data.reduce((a, b) => a + b, 0).toLocaleString("en-US")} events in 14 days`}>
-      {data.map((n, i) => <i key={i} className={n ? "" : "z"} style={{ height: `${n ? Math.max(12, (n / max) * 100) : 8}%` }} />)}
-    </span>
   );
 }

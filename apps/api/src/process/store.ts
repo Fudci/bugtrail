@@ -16,6 +16,7 @@ export interface StoreOptions {
 
 export class BacklogFullError extends Error {}
 
+type Row = { id: number; project_id: string; received_at: string; payload: string };
 type Pending = { jobs: IngestJob[]; resolve: () => void; reject: (e: unknown) => void };
 
 const STORAGE_CODES = new Set(["SQLITE_FULL", "SQLITE_IOERR", "SQLITE_CANTOPEN", "SQLITE_READONLY", "SQLITE_CORRUPT"]);
@@ -31,8 +32,10 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  *
  * enqueue(): request dikumpulkan beberapa ms lalu ditulis dalam satu transaksi (group commit);
  *            promise baru resolve SETELAH data ada di disk → aman membalas 200 ke SDK.
- * loop:      ambil batch berurutan dari antrian, simpan issue/event + hapus baris antrian
- *            dalam satu transaksi (persistBatch). Crash di mana pun → tidak ada event hilang.
+ * loop:      ambil batch secara adil per project (event tertua tiap project, bergiliran), simpan
+ *            issue/event + hapus baris antrian dalam satu transaksi (persistBatch).
+ *            Crash di mana pun → tidak ada event hilang. Satu project yang membanjiri antrian
+ *            tidak menunda project lain: tiap batch memberi jatah ke semua project yang antre.
  */
 export class IngestStore {
   private pending: Pending[] = [];
@@ -47,16 +50,26 @@ export class IngestStore {
   failed = 0;
 
   private insert;
-  private select;
+  private projects;
+  private selectProject;
+  private selectId;
   private dropOne;
-  /** Setelah error data: proses satu per satu sampai baris bermasalah ketemu. */
-  private isolate = 0;
+  /** Setelah error data: id baris batch yang gagal, diproses satu per satu sampai yang bermasalah ketemu. */
+  private isolate: number[] = [];
+  /** Giliran project berikutnya kalau jumlah project melebihi batchSize. */
+  private cursor = 0;
 
   constructor(private db: RawDb, private opts: StoreOptions) {
     this.insert = db.prepare("INSERT INTO ingest_queue (project_id, received_at, payload) VALUES (?, ?, ?)");
-    this.select = db.prepare<[number], { id: number; project_id: string; received_at: string; payload: string }>(
-      "SELECT id, project_id, received_at, payload FROM ingest_queue ORDER BY id LIMIT ?",
+    // Daftar project yang antre lewat indeks (project_id, id): satu lompatan indeks per project, bukan scan antrian.
+    this.projects = db.prepare(`WITH RECURSIVE p(pid) AS (
+        SELECT MIN(project_id) FROM ingest_queue
+        UNION ALL SELECT (SELECT MIN(project_id) FROM ingest_queue WHERE project_id > p.pid) FROM p WHERE p.pid IS NOT NULL)
+      SELECT pid FROM p WHERE pid IS NOT NULL`).pluck();
+    this.selectProject = db.prepare<[string, number, number], Row>(
+      "SELECT id, project_id, received_at, payload FROM ingest_queue WHERE project_id = ? AND id > ? ORDER BY id LIMIT ?",
     );
+    this.selectId = db.prepare<[number], Row>("SELECT id, project_id, received_at, payload FROM ingest_queue WHERE id = ?");
     this.dropOne = db.prepare("DELETE FROM ingest_queue WHERE id = ?");
     // Sisa antrian dari run sebelumnya (mis. setelah crash) ikut diproses.
     this.backlog = db.prepare("SELECT COUNT(*) FROM ingest_queue").pluck().get() as number;
@@ -123,10 +136,48 @@ export class IngestStore {
     while (this.size > 0 || this.busy) await sleep(5);
   }
 
+  /**
+   * Ambil batch adil: jatah batchSize dibagi rata ke project yang antre (tertua dulu per project);
+   * sisa jatah dari project yang antreannya pendek diberikan ke project lain.
+   */
+  private nextBatch(): Row[] {
+    if (this.backlog <= 0) return [];
+    while (this.isolate.length) {
+      const row = this.selectId.get(this.isolate[0]!);
+      if (row) return [row];
+      this.isolate.shift();
+    }
+    const all = this.projects.all() as string[];
+    if (!all.length) return [];
+    const limit = this.opts.batchSize;
+    // Lebih banyak project daripada jatah: bergiliran mulai dari cursor.
+    const start = this.cursor % all.length;
+    const pids = all.length > limit ? [...all.slice(start), ...all.slice(0, start)].slice(0, limit) : all;
+    this.cursor = start + pids.length;
+    const rows: Row[] = [];
+    let left = limit;
+    let open = pids;
+    const last = new Map<string, number>();
+    while (left > 0 && open.length) {
+      const share = Math.max(1, Math.floor(left / open.length));
+      const next: string[] = [];
+      for (const pid of open) {
+        if (left <= 0) break;
+        const take = Math.min(share, left);
+        const got = this.selectProject.all(pid, last.get(pid) ?? 0, take);
+        if (got.length) last.set(pid, got.at(-1)!.id);
+        rows.push(...got);
+        left -= got.length;
+        if (got.length === take) next.push(pid);
+      }
+      open = next;
+    }
+    return rows;
+  }
+
   private async loop() {
     while (!this.stopping) {
-      const limit = this.isolate > 0 ? 1 : this.opts.batchSize;
-      const rows = this.backlog > 0 ? this.select.all(limit) : [];
+      const rows = this.nextBatch();
       if (rows.length === 0) {
         this.backlog = 0;
         await new Promise<void>((r) => (this.wake = r));
@@ -144,7 +195,7 @@ export class IngestStore {
         const res = persistBatch(this.db, jobs, this.opts.symbolicator);
         this.backlog = Math.max(0, this.backlog - rows.length);
         this.processed += res.created;
-        if (this.isolate > 0) this.isolate--;
+        if (this.isolate.length) this.isolate.shift();
         this.opts.onBatch?.(res);
       } catch (err) {
         if (isBusy(err)) {
@@ -156,13 +207,13 @@ export class IngestStore {
           await sleep(5000);
         } else if (rows.length > 1) {
           // Error data di salah satu event: pecah batch untuk menemukan yang bermasalah.
-          this.isolate = rows.length;
+          this.isolate = rows.map((r) => r.id);
         } else {
           // Satu event yang selalu gagal (mis. project-nya sudah dihapus): buang supaya antrian jalan.
           this.dropOne.run(rows[0]!.id);
           this.backlog = Math.max(0, this.backlog - 1);
           this.failed++;
-          if (this.isolate > 0) this.isolate--;
+          if (this.isolate.length) this.isolate.shift();
           this.opts.log?.(`dropped unprocessable event (queue id ${rows[0]!.id})`, err);
         }
       } finally {

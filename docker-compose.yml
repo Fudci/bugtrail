@@ -1,6 +1,13 @@
-# bugtool: satu container. Data SQLite tersimpan di volume "bugtool-data".
-#   docker compose up -d --build
-#   (admin pertama: set ADMIN_EMAIL + ADMIN_PASSWORD, atau: docker compose exec bugtool node create-admin.js)
+# BugTrail. Two ways to run it:
+#
+#   Lite (default): one container, everything in SQLite (volume "bugtool-data").
+#     docker compose up -d --build
+#
+#   Scale: adds ClickHouse and stores every OpenTelemetry trace and log there (issues/users stay in SQLite).
+#     TELEMETRY_STORE=clickhouse CLICKHOUSE_PASSWORD='choose-a-long-password' \
+#       docker compose --profile scale up -d --build
+#
+# First admin: set ADMIN_EMAIL + ADMIN_PASSWORD, or run: docker compose exec bugtool node create-admin.js
 services:
   bugtool:
     build: .
@@ -8,17 +15,45 @@ services:
     container_name: bugtool
     ports:
       - "${BUGTOOL_PORT:-4000}:4000"
+      # OTLP/gRPC for traces and logs (exporters with OTEL_EXPORTER_OTLP_PROTOCOL=grpc). Plain gRPC, no TLS:
+      # put a gRPC-capable reverse proxy in front for HTTPS.
+      - "${BUGTOOL_OTLP_GRPC_PORT:-4317}:4317"
     environment:
-      # URL publik (dipakai di DSN dan link undangan). Ganti ke domain HTTPS di produksi.
+      # Public URL (used in DSNs and invite links). Use your HTTPS domain in production.
       PUBLIC_URL: ${PUBLIC_URL:-http://localhost:4000}
       WEB_URL: ${PUBLIC_URL:-http://localhost:4000}
-      # Admin pertama, dibuat saat start hanya jika belum ada user sama sekali.
+      # First admin, created on start only while there are no users.
       ADMIN_EMAIL: ${ADMIN_EMAIL:-}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      # Trace and log storage: sqlite (Lite, default) or clickhouse (Scale, needs the "scale" profile).
+      TELEMETRY_STORE: ${TELEMETRY_STORE:-sqlite}
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: bugtrail
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_DATABASE: bugtrail
     volumes:
       - bugtool-data:/data
     mem_limit: 384m
     restart: unless-stopped
 
+  # Only started with --profile scale. BugTrail waits up to 60 s for it on startup.
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.9
+    container_name: bugtrail-clickhouse
+    profiles: ["scale"]
+    environment:
+      CLICKHOUSE_USER: bugtrail
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_DB: bugtrail
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    # Not published on the host: only BugTrail talks to it over the compose network.
+    mem_limit: ${CLICKHOUSE_MEM_LIMIT:-4g}
+    restart: unless-stopped
+
 volumes:
   bugtool-data:
+  clickhouse-data:

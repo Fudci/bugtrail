@@ -3,6 +3,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { PrismaClient } from "@bugtool/db";
 import type { IngestJob } from "../process/persist.js";
+import type { QuotaMeter } from "../process/quota.js";
 import { BacklogFullError, type IngestStore } from "../process/store.js";
 import { extractPublicKey } from "./auth.js";
 import { keyCache } from "./key-cache.js";
@@ -16,8 +17,8 @@ const eventSchema = z.looseObject({
 // DSN baru memakai nomor project (angka); UUID tetap diterima untuk DSN lama.
 const paramsSchema = z.object({ projectId: z.union([z.uuid(), z.string().regex(/^\d{1,9}$/)]) });
 
-export async function ingestRoutes(app: FastifyInstance, opts: { prisma: PrismaClient; store: IngestStore }) {
-  const { prisma, store } = opts;
+export async function ingestRoutes(app: FastifyInstance, opts: { prisma: PrismaClient; store: IngestStore; quota?: QuotaMeter | undefined }) {
+  const { prisma, store, quota } = opts;
 
   // Return UUID project kalau key sah untuk project (nomor publik atau UUID) itu, null kalau tidak.
   async function resolveProject(publicKey: string, ref: string): Promise<string | null> {
@@ -93,10 +94,20 @@ export async function ingestRoutes(app: FastifyInstance, opts: { prisma: PrismaC
     }
 
     if (jobs.length) {
+      // Kuota per menit: request ditolak utuh. X-Sentry-Rate-Limits = "<detik>:<kategori>:<scope>",
+      // SDK berhenti mengirim kategori error sampai jendela berikutnya.
+      const q = quota?.consume(projectId, "events", jobs.length);
+      if (q && !q.ok) {
+        return reply.code(429)
+          .header("retry-after", String(q.retryAfter))
+          .header("x-sentry-rate-limits", `${q.retryAfter}:error:project`)
+          .send({ detail: "project quota exceeded" });
+      }
       try {
         // Balas 200 hanya setelah event tersimpan di disk.
         await store.enqueue(jobs);
       } catch (err) {
+        quota?.refund(projectId, "events", jobs.length);
         // Antrian penuh: SDK Sentry menghormati 429 + Retry-After dan mengirim ulang nanti.
         if (err instanceof BacklogFullError) return reply.code(429).header("retry-after", "5").send({ detail: "server busy" });
         req.log.error(err, "enqueue failed");

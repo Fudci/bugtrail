@@ -1,9 +1,9 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { Bug, BugOff, Check, ChevronsUpDown, LayoutGrid, LogOut, Plus, Search, Settings } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useState } from "react";
 import { Link, Navigate, NavLink, Outlet, useLocation, useNavigate, useParams } from "react-router";
 import { api } from "../api";
-import { initial, rememberProject, useMe, useProjects } from "../hooks";
+import { initial, personName, rememberProject, useMe, useProjects } from "../hooks";
 import { BrandLogo } from "./Brand";
 import { Popover } from "./Popover";
 import { BugCatcher, BugServer } from "./BugCatcher";
@@ -24,6 +24,12 @@ export function Layout() {
   const [bugsOn, setBugsOn] = useState(() => localStorage.getItem("bt_bugs") !== "off");
   const { projectId } = useParams();
   const navigate = useNavigate();
+  const loc = useLocation();
+  // Halaman detail trace: sorot menu asal (Traces bila dari pencarian, selain itu API Health).
+  const onTrace = /^\/p\/[^/]+\/traces\/[^/]+/.test(loc.pathname);
+  const fromTraces = typeof (loc.state as { fromTraces?: unknown } | null)?.fromTraces === "string";
+  // Trace dibuka dari halaman Logs: sorot menu Logs (bukan API Health).
+  const fromLogs = typeof (loc.state as { fromLogs?: unknown } | null)?.fromLogs === "string";
   const qc = useQueryClient();
   const [filter, setFilter] = useState("");
 
@@ -66,11 +72,11 @@ export function Layout() {
           )}
           <Popover
             align="right"
-            trigger={(toggle) => <a className="yt-av" onClick={toggle}>{initial(me.name ?? me.email)}</a>}
+            trigger={(toggle) => <a className="yt-av" onClick={toggle}>{initial(personName(me))}</a>}
           >
             {(close) => (
               <>
-                <div className="cap">{me.email}</div>
+                <div className="cap">@{me.username}{me.email ? ` · ${me.email}` : ""}</div>
                 {projectId && <Link to={`/p/${projectId}/settings`} onClick={close}><Settings />Settings</Link>}
                 <hr />
                 <a onClick={logout}><LogOut />Sign out</a>
@@ -115,6 +121,10 @@ export function Layout() {
             <NavLink to={`/p/${projectId}/issues`} className={({ isActive }) => (isActive ? "on" : "")} end={false}>
               Issues
             </NavLink>
+            <NavLink to={`/p/${projectId}/health`} className={({ isActive }) => (isActive || (onTrace && !fromTraces && !fromLogs) ? "on" : "")}>API Health</NavLink>
+            <NavLink to={`/p/${projectId}/services`} className={({ isActive }) => (isActive ? "on" : "")}>Services</NavLink>
+            <NavLink to={`/p/${projectId}/traces`} end className={({ isActive }) => (isActive || (onTrace && fromTraces) ? "on" : "")}>Traces</NavLink>
+            <NavLink to={`/p/${projectId}/logs`} className={({ isActive }) => (isActive || (onTrace && fromLogs) ? "on" : "")}>Logs</NavLink>
             <NavLink to={`/p/${projectId}/releases`} className={({ isActive }) => (isActive ? "on" : "")}>Releases</NavLink>
             <NavLink to="/projects" className={({ isActive }) => (isActive ? "on" : "")}>Projects</NavLink>
           </nav>

@@ -8,6 +8,19 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      # Untuk tes mode Scale (ClickHouseTelemetryStore). Kredensial khusus CI, bukan rahasia.
+      clickhouse:
+        image: clickhouse/clickhouse-server:26.9
+        env:
+          CLICKHOUSE_USER: ci
+          CLICKHOUSE_PASSWORD: ci-only-password
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+        ports: ["8123:8123"]
+        options: >-
+          --ulimit nofile=262144:262144
+          --health-cmd "clickhouse-client --user ci --password ci-only-password -q 'SELECT 1'"
+          --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -20,3 +33,7 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm test:int
+        env:
+          CLICKHOUSE_TEST_URL: http://localhost:8123
+          CLICKHOUSE_TEST_USER: ci
+          CLICKHOUSE_TEST_PASSWORD: ci-only-password

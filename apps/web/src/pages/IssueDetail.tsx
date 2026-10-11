@@ -3,8 +3,10 @@ import { Activity, ArrowLeft, BellOff, Check, Clock, ClockAlert, RotateCcw, Tras
 import { useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 import { AffectedUsers, EventContext, EventsList, Permissions, Tags } from "./EventPanels";
+import { TraceLogs } from "../components/TraceLogs";
+import { TraceView } from "../components/TraceView";
 import { api, type EventDetail, type IssueDetail, type IssueStatus, type Member } from "../api";
-import { formatDate, initial } from "../hooks";
+import { formatDate, initial, personName } from "../hooks";
 
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -119,7 +121,7 @@ export function IssueDetailPage() {
   const { projectId, issueId } = useParams();
   const qc = useQueryClient();
   const navigate = useNavigate();
-  const [tab, setTab] = useState<"stack" | "minified" | "events" | "raw">("stack");
+  const [tab, setTab] = useState<"stack" | "minified" | "trace" | "logs" | "events" | "raw">("stack");
   const issue = useQuery({ queryKey: ["issue", issueId], queryFn: () => api.get<IssueDetail>(`/issues/${issueId}`) });
   // Event yang sedang dilihat ada di URL (?event=...) supaya bisa dibagikan; kosong = event terbaru.
   const [params, setParams] = useSearchParams();
@@ -164,6 +166,8 @@ export function IssueDetailPage() {
   const canEdit = i.role !== "viewer";
   const e = selectedId ? selected.data?.event ?? null : i.latestEvent;
   const sourcemapsMissing = selectedId ? selected.data?.sourcemapsMissing ?? [] : i.sourcemapsMissing;
+  const otel = e ? otelTrace(e.payload) : null;
+  const traceOf = e ? eventTrace(e.payload) : null;
 
   return (
     <section>
@@ -173,6 +177,7 @@ export function IssueDetailPage() {
           <div className="row" style={{ marginBottom: 14 }}>
             <span className={`tag ${i.level === "error" || i.level === "fatal" ? "err" : ""}`}>● {i.level}</span>
             {i.status !== "unresolved" && <span className="tag acc">{i.status}</span>}
+            {otel && <span className="tag via-otel" title="Received over OTLP from an OpenTelemetry SDK">via OpenTelemetry</span>}
           </div>
           <h1 style={{ fontSize: 38, overflowWrap: "anywhere" }}>{i.title}</h1>
           {i.culprit && <p className="mono sub" style={{ marginTop: 10, fontSize: 13 }} title={i.culprit}>{shortPath(i.culprit)}</p>}
@@ -188,14 +193,14 @@ export function IssueDetailPage() {
               <button className="btn" disabled={update.isPending} onClick={() => update.mutate({ status: "unresolved" })}><RotateCcw />Reopen</button>
             )}
             <label className="btn" style={{ paddingLeft: 10 }}>
-              <span className={`who ${i.assignee ? "" : "none"}`} style={{ width: 26, height: 26, fontSize: 11 }}>{i.assignee ? initial(i.assignee.name ?? i.assignee.email) : ""}</span>
+              <span className={`who ${i.assignee ? "" : "none"}`} style={{ width: 26, height: 26, fontSize: 11 }}>{i.assignee ? initial(personName(i.assignee)) : ""}</span>
               <select
                 value={i.assignee?.id ?? ""}
                 onChange={(ev) => update.mutate({ assigneeId: ev.target.value || null })}
                 style={{ cursor: "pointer" }}
               >
                 <option value="">Unassigned</option>
-                {members.data?.members.map((m) => <option key={m.id} value={m.id}>{m.name ?? m.email}</option>)}
+                {members.data?.members.map((m) => <option key={m.id} value={m.id}>{personName(m)}</option>)}
               </select>
             </label>
             {i.role === "admin" && (
@@ -223,6 +228,8 @@ export function IssueDetailPage() {
             <div className="ptabs">
               <a className={tab === "stack" ? "on" : ""} onClick={() => setTab("stack")}>Stacktrace</a>
               {e && hasRawStacktrace(e.payload) && <a className={tab === "minified" ? "on" : ""} onClick={() => setTab("minified")}>Minified</a>}
+              {otel && <a className={tab === "trace" ? "on" : ""} onClick={() => setTab("trace")}>Trace</a>}
+              {traceOf && <a className={tab === "logs" ? "on" : ""} onClick={() => setTab("logs")}>Logs</a>}
               <a className={tab === "events" ? "on" : ""} onClick={() => setTab("events")}>Events {i.eventCount.toLocaleString("en-US")}</a>
               <a className={tab === "raw" ? "on" : ""} onClick={() => setTab("raw")}>JSON</a>
             </div>
@@ -242,7 +249,7 @@ export function IssueDetailPage() {
             </div>
           )}
           {tab === "events" ? <EventsList issueId={i.id} currentEventId={e?.id} onOpen={openEvent} /> :
-            !e ? <p className="sub">{selectedId && selected.isPending ? "Loading…" : "No events yet."}</p> : tab === "stack" ? <Stacktrace payload={e.payload} /> : tab === "minified" ? <Stacktrace payload={e.payload} raw /> : (
+            !e ? <p className="sub">{selectedId && selected.isPending ? "Loading…" : "No events yet."}</p> : tab === "stack" ? <Stacktrace payload={e.payload} /> : tab === "minified" ? <Stacktrace payload={e.payload} raw /> : tab === "trace" && otel ? <TraceView issueId={i.id} traceId={otel} /> : tab === "logs" && traceOf ? <TraceLogs projectId={projectId!} traceId={traceOf} emptyText="No logs for this event's trace." /> : (
             <pre className="code" style={{ maxHeight: 600 }}>{JSON.stringify(e.payload, null, 2)}</pre>
           )}
         </div>
@@ -262,4 +269,17 @@ export function IssueDetailPage() {
       </div>
     </section>
   );
+}
+
+// trace_id event apa pun (Sentry SDK atau OpenTelemetry): log OTLP dengan trace_id sama ditampilkan di tab Logs.
+function eventTrace(payload: unknown): string | null {
+  const id = (payload as { contexts?: { trace?: { trace_id?: string } } } | null)?.contexts?.trace?.trace_id;
+  return typeof id === "string" && /^[0-9a-f]{32}$/.test(id) ? id : null;
+}
+
+// trace_id dari event yang masuk lewat OpenTelemetry (hanya trace itu yang span-nya disimpan BugTrail).
+function otelTrace(payload: unknown): string | null {
+  const p = payload as { sdk?: { name?: string }; contexts?: { trace?: { trace_id?: string } } } | null;
+  const id = p?.contexts?.trace?.trace_id;
+  return p?.sdk?.name === "opentelemetry" && typeof id === "string" && /^[0-9a-f]{32}$/.test(id) ? id : null;
 }
