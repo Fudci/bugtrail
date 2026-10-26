@@ -4,6 +4,8 @@ import { useNavigate, useParams, useSearchParams } from "react-router";
 import { QuotaBanner } from "../components/QuotaBanner";
 import { api, type IssueStatus, type Level } from "../api";
 import { RangeTabs, rangeLabel, readRange, type RangeOption } from "../components/RangeTabs";
+import { StatusChips } from "../components/StatusChips";
+import { parseStatus } from "../components/status-util";
 
 interface Totals { events: number; users: number; newIssues: number }
 interface OverviewData {
@@ -15,6 +17,7 @@ interface OverviewData {
   platforms: { name: string; events: number }[];
   releases: string[];
   environments: string[];
+  statusCounts: { code: number; count: number }[];
 }
 type Range = "24h" | "7d" | "14d" | "30d";
 const RANGES: RangeOption<Range>[] = [
@@ -50,6 +53,8 @@ export function OverviewPage() {
   const environment = params.get("environment") ?? "";
   const level = params.get("level") ?? "";
   const platform = params.get("platform") ?? "";
+  // Status HTTP event (tag "status" dari SDK), token sama dengan Traces: 409, 5xx, 520-529.
+  const http = (parseStatus(params.get("http")) ?? []).join(",");
   const setParam = (k: string, v: string) => {
     const next = new URLSearchParams(params);
     if (v) next.set(k, v); else next.delete(k);
@@ -57,13 +62,14 @@ export function OverviewPage() {
   };
 
   const overview = useQuery({
-    queryKey: ["overview", projectId, range, release, environment, level, platform],
+    queryKey: ["overview", projectId, range, release, environment, level, platform, http],
     queryFn: () => {
       const qs = new URLSearchParams({ range, tz: String(-new Date().getTimezoneOffset()) });
       if (release) qs.set("release", release);
       if (environment) qs.set("environment", environment);
       if (level) qs.set("level", level);
       if (platform) qs.set("platform", platform);
+      if (http) qs.set("http", http);
       return api.get<OverviewData>(`/projects/${projectId}/overview?${qs}`);
     },
     placeholderData: (prev) => prev,
@@ -76,12 +82,14 @@ export function OverviewPage() {
   if (environment) exportQs.set("environment", environment);
   if (level) exportQs.set("level", level);
   if (platform) exportQs.set("platform", platform);
+  if (http) exportQs.set("http", http);
 
   // Klik di overview membawa filter yang sama ke halaman Issues.
   const issuesLink = (extra: Record<string, string> = {}) => {
     const qs = new URLSearchParams({ status: "all", ...extra });
     if (release) qs.set("release", release);
     if (level) qs.set("level", level);
+    if (http) qs.set("http", http);
     return `/p/${projectId}/issues?${qs}`;
   };
 
@@ -147,17 +155,27 @@ export function OverviewPage() {
           {(["fatal", "error", "warning", "info", "debug"] as const).map((l) => <option key={l} value={l} style={{ textTransform: "capitalize" }}>{l}</option>)}
         </select>
         <a className="btn sm" href={`/api/0/projects/${projectId}/overview/export?${exportQs}`} download>
-          <Download />Export CSV
+          <Download />Export issues
+        </a>
+        <a className="btn sm" href={`/api/0/projects/${projectId}/overview/events-export?${exportQs}`} download title="One row per event: time, user, device, OS, app version, HTTP status, message">
+          <Download />Export events
         </a>
         {platform && (
           <span className="tag acc filter-chip">platform: {platform}
             <button type="button" className="chip-x" onClick={() => setParam("platform", "")} aria-label="Clear platform filter"><X /></button>
           </span>
         )}
-        {(release || environment || level || platform) && (
+        {(release || environment || level || platform || http) && (
           <a className="btn sm" onClick={() => setParams(range === "14d" ? {} : { range }, { replace: true })}>Clear filters</a>
         )}
       </div>
+
+      {d && (d.statusCounts.length > 0 || http) && (
+        <div style={{ marginTop: "calc(-1 * var(--s3))", marginBottom: "var(--s5)" }}>
+          <StatusChips value={http ? http.split(",") : []} counts={d.statusCounts} loading={overview.isFetching}
+            onChange={(t) => setParam("http", t.join(","))} />
+        </div>
+      )}
 
       {overview.isPending && <div className="empty">Loading…</div>}
       {overview.isError && <div className="empty">Failed to load overview: {overview.error.message}</div>}

@@ -1,4 +1,4 @@
-import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Download, Search, Trash2, X } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router";
@@ -6,6 +6,8 @@ import { api, type IssueSummary } from "../api";
 import { AssigneePicker } from "../components/AssigneePicker";
 import { formatDate, timeAgo, useProject } from "../hooks";
 import { Spark } from "../components/Spark";
+import { StatusChips } from "../components/StatusChips";
+import { parseStatus, type StatusCount } from "../components/status-util";
 
 const TABS = [
   { key: "unresolved", label: "Unresolved" },
@@ -23,6 +25,7 @@ export function IssuesPage() {
   const query = params.get("query") ?? "";
   const release = params.get("release") ?? "";
   const firstRelease = params.get("firstRelease") ?? "";
+  const http = (parseStatus(params.get("http")) ?? []).join(",");
   const [draft, setDraft] = useState(query);
   const role = useProject().data?.role;
   const isAdmin = role === "admin";
@@ -45,7 +48,7 @@ export function IssuesPage() {
     },
   });
   // Pilihan dikosongkan saat filter berubah supaya tidak menghapus issue yang tidak terlihat.
-  useEffect(() => setSelected(new Set()), [projectId, status, level, query, release, firstRelease]);
+  useEffect(() => setSelected(new Set()), [projectId, status, level, query, release, firstRelease, http]);
   useEffect(() => setDraft(query), [query]);
 
   const setParam = (k: string, v: string) => {
@@ -61,9 +64,18 @@ export function IssuesPage() {
   if (query) filterQs.set("query", query);
   if (release) filterQs.set("release", release);
   if (firstRelease) filterQs.set("firstRelease", firstRelease);
+  if (http) filterQs.set("http", http);
+  // Pencarian & status dibawa ke halaman issue supaya event di sana ikut tersaring (mis. hanya milik satu NRK).
+  const detailQs = new URLSearchParams();
+  if (query) detailQs.set("q", query);
+  if (http) detailQs.set("http", http);
+  const statusCounts = useQuery({
+    queryKey: ["issue-http-statuses", projectId],
+    queryFn: () => api.get<{ statusCounts: StatusCount[] }>(`/projects/${projectId}/issues/http-statuses`),
+  });
 
   const issues = useInfiniteQuery({
-    queryKey: ["issues", projectId, status, level, query, release, firstRelease],
+    queryKey: ["issues", projectId, status, level, query, release, firstRelease, http],
     queryFn: ({ pageParam }) => {
       const qs = new URLSearchParams(filterQs);
       qs.set("limit", "25");
@@ -107,7 +119,10 @@ export function IssuesPage() {
           <option value="debug">Debug</option>
         </select>
         <a className="btn sm" href={`/api/0/projects/${projectId}/issues/export?${filterQs}`} download>
-          <Download />Export CSV
+          <Download />Export issues
+        </a>
+        <a className="btn sm" href={`/api/0/projects/${projectId}/issues/events-export?${filterQs}`} download title="One row per event: time, user, device, OS, app version, HTTP status, message">
+          <Download />Export events
         </a>
         {isAdmin && selected.size > 0 && (
           <button className="btn sm" style={{ background: "var(--red)", color: "#fff" }} disabled={bulkDelete.isPending}
@@ -121,6 +136,13 @@ export function IssuesPage() {
         {query && <span className="tag acc filter-chip">“{query}”<button type="button" className="chip-x" onClick={() => setParam("query", "")} aria-label="Clear filter"><X /></button></span>}
       </div>
 
+      {(http || (statusCounts.data?.statusCounts.length ?? 0) > 0) && (
+        <div style={{ marginTop: "calc(-1 * var(--s3))", marginBottom: "var(--s5)" }}>
+          <StatusChips value={http ? http.split(",") : []} counts={statusCounts.data?.statusCounts} loading={statusCounts.isFetching}
+            onChange={(t) => setParam("http", t.join(","))} />
+        </div>
+      )}
+
       <div className="ihead issues-grid">
         {isAdmin && rows.length > 0 ? (
           <input type="checkbox" className="check" title="Select all" checked={rows.length > 0 && rows.every((r) => selected.has(r.id))}
@@ -131,10 +153,10 @@ export function IssuesPage() {
         {issues.isPending && <div className="empty">Loading…</div>}
         {issues.isError && <div className="empty">Failed to load issues: {issues.error.message}</div>}
         {issues.isSuccess && rows.length === 0 && (
-          <div className="empty">{query || level || release || firstRelease || status !== "unresolved" ? "No matching issues." : "No errors yet. Install the SDK using the DSN from Settings."}</div>
+          <div className="empty">{query || level || release || firstRelease || http || status !== "unresolved" ? "No matching issues." : "No errors yet. Install the SDK using the DSN from Settings."}</div>
         )}
         {rows.map((i) => (
-          <div key={i.id} className="irow issues-grid" onClick={() => navigate(`/p/${projectId}/issues/${i.id}`)}>
+          <div key={i.id} className="irow issues-grid" onClick={() => navigate(`/p/${projectId}/issues/${i.id}${detailQs.size ? `?${detailQs}` : ""}`)}>
             {isAdmin ? (
               <input type="checkbox" className="check" checked={selected.has(i.id)} onClick={(e) => e.stopPropagation()} onChange={() => toggle(i.id)} />
             ) : <span className={`lv ${i.level}`} />}

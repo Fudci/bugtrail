@@ -1,8 +1,10 @@
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { BatteryCharging, Battery, ShieldCheck, Wifi, WifiOff } from "lucide-react";
 import { Fragment, useState, type ReactNode } from "react";
 import { api, type EventDetail } from "../api";
 import { formatDate, timeAgo } from "../hooks";
+import { Pager } from "../components/Pager";
+import type { PageSize } from "../components/pager-util";
 
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -140,8 +142,9 @@ export function Tags({ event }: { event: EventDetail }) {
 
 interface AffectedUser { userId: string; events: number; lastSeen: string; lastEventId: string }
 
-export function AffectedUsers({ issueId, currentEventId, onOpen }: { issueId: string; currentEventId?: string | undefined; onOpen: (eventId: string) => void }) {
-  const users = useQuery({ queryKey: ["issue-users", issueId], queryFn: () => api.get<AffectedUser[]>(`/issues/${issueId}/users`) });
+// match: query string filter event (q=..&http=..), kosong = semua event issue.
+export function AffectedUsers({ issueId, match = "", currentEventId, onOpen }: { issueId: string; match?: string; currentEventId?: string | undefined; onOpen: (eventId: string) => void }) {
+  const users = useQuery({ queryKey: ["issue-users", issueId, match], queryFn: () => api.get<AffectedUser[]>(`/issues/${issueId}/users?${match}`) });
   if (!users.data || users.data.length === 0) return null;
   return (
     <div className="card">
@@ -161,20 +164,21 @@ export function AffectedUsers({ issueId, currentEventId, onOpen }: { issueId: st
 }
 
 interface EventRow {
-  id: string; receivedAt: string; release: string | null; userId: string | null;
+  id: string; receivedAt: string; release: string | null; userId: string | null; httpStatus: number | null;
   device: string | null; os: string | null; online: boolean | null; connection: string | null;
 }
 
-export function EventsList({ issueId, currentEventId, onOpen }: { issueId: string; currentEventId?: string | undefined; onOpen: (eventId: string) => void }) {
-  const events = useInfiniteQuery({
-    queryKey: ["issue-events", issueId],
-    queryFn: ({ pageParam }) => api.get<{ events: EventRow[]; nextCursor: string | null }>(
-      `/issues/${issueId}/events?limit=25${pageParam ? `&cursor=${pageParam}` : ""}`),
-    initialPageParam: "",
-    getNextPageParam: (last) => last.nextCursor ?? undefined,
+export function EventsList({ issueId, match = "", currentEventId, onOpen }: { issueId: string; match?: string; currentEventId?: string | undefined; onOpen: (eventId: string) => void }) {
+  const [page, setPage] = useState(1);
+  const [size, setSize] = useState<PageSize>(25);
+  const events = useQuery({
+    queryKey: ["issue-events", issueId, match, page, size],
+    queryFn: () => api.get<{ events: EventRow[]; total: number }>(`/issues/${issueId}/events?${match}${match ? "&" : ""}page=${page}&size=${size}`),
+    placeholderData: keepPreviousData,
   });
-  const rows = events.data?.pages.flatMap((p) => p.events) ?? [];
+  const rows = events.data?.events ?? [];
   if (events.isPending) return <p className="sub">Loading…</p>;
+  if (events.isError) return <p className="err-msg">{events.error.message}</p>;
   return (
     <div>
       {rows.map((ev) => (
@@ -183,6 +187,7 @@ export function EventsList({ issueId, currentEventId, onOpen }: { issueId: strin
             outline: ev.id === currentEventId ? "2px solid var(--sel)" : undefined }}>
           <span className="mono" style={{ fontSize: 12 }}>{formatDate(ev.receivedAt)}</span>
           <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13 }}>
+            {ev.httpStatus !== null && <span className={`tag ${ev.httpStatus >= 500 ? "err" : ""}`} style={{ height: 20, marginRight: 8 }}>{ev.httpStatus}</span>}
             <b className="mono" style={{ fontWeight: 500 }}>{ev.userId ?? "—"}</b>
             <span className="sub"> · {[ev.device, ev.os, ev.release].filter(Boolean).join(" · ")}</span>
           </span>
@@ -191,9 +196,8 @@ export function EventsList({ issueId, currentEventId, onOpen }: { issueId: strin
           </span>
         </div>
       ))}
-      {events.hasNextPage && (
-        <button className="btn sm" onClick={() => events.fetchNextPage()} disabled={events.isFetchingNextPage}>{events.isFetchingNextPage ? "Loading…" : "Load more"}</button>
-      )}
+      <Pager page={page} size={size} total={events.data.total} rows={rows.length}
+        onPage={setPage} onSize={(s) => { setSize(s); setPage(1); }} />
       <p className="sub" style={{ fontSize: 12, marginTop: 8 }}>Events removed by retention are not shown.</p>
     </div>
   );

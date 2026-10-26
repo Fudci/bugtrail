@@ -3,6 +3,9 @@ import { z } from "zod";
 import { Prisma, toDbDate, type PrismaClient } from "@bugtool/db";
 import { projectRole, requireUser } from "../auth/session.js";
 import { toCsv } from "./csv.js";
+import { eventMatchSql, eventsCsv, ftsMatch, httpParam, httpStatusCounts, httpStatusSql, type EventMatch } from "./events-query.js";
+import { OLD_PAGE_MESSAGE, pageQuery } from "./paging.js";
+import { MAX_PAGE_OFFSET } from "../otlp/telemetry-store.js";
 import { traceView, type TelemetryStore } from "../otlp/telemetry-store.js";
 import { unsymbolicatedDebugIds, type Symbolicator } from "../sourcemaps/symbolicate.js";
 
@@ -16,10 +19,14 @@ const listQuery = z.object({
   query: z.string().trim().max(200).optional(),
   release: z.string().max(200).optional(),
   firstRelease: z.string().max(200).optional(),
+  http: httpParam,
   cursor: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(25),
 });
-const eventsQuery = z.object({ cursor: z.string().optional(), limit: z.coerce.number().int().min(1).max(50).default(20) });
+// Filter event di dalam satu issue: ?q= (sama dengan pencarian Issues) dan ?http= (status HTTP).
+const matchQuery = z.object({ q: z.string().trim().max(200).optional(), http: httpParam });
+const eventsQuery = matchQuery.extend(pageQuery);
+const matchOf = (m: z.infer<typeof matchQuery>): EventMatch => ({ query: m.q || undefined, http: m.http });
 const patchBody = z
   .object({ status: z.enum(STATUSES).optional(), assigneeId: z.uuid().nullable().optional() })
   .refine((b) => b.status !== undefined || b.assigneeId !== undefined, "nothing to update");
@@ -35,22 +42,28 @@ function decodeCursor(c: string): { at: Date; id: string } | null {
   return { at, id };
 }
 
-// Cari issue lewat isi event (FTS5). Tiap kata jadi prefix-term yang di-quote, supaya input user
-// tidak bisa membentuk sintaks FTS (mis. "user.id" atau tanda kutip) yang membuat query error.
+// Cari issue lewat isi event (FTS5).
 async function searchIssueIds(prisma: PrismaClient, projectId: string, query: string) {
-  const terms = query.match(/[\p{L}\p{N}_]+/gu)?.slice(0, 8) ?? [];
-  if (terms.length === 0) return [];
-  const match = terms.map((t) => `"${t}"*`).join(" ");
+  const match = ftsMatch(query);
+  if (!match) return [];
   const rows = await prisma.$queryRaw<{ issue_id: string }[]>`
     SELECT DISTINCT issue_id FROM events_fts WHERE events_fts MATCH ${match} AND project_id = ${projectId} LIMIT 1000`;
   return rows.map((r) => r.issue_id);
 }
 
-type IssueFilter = Pick<z.infer<typeof listQuery>, "status" | "level" | "query" | "release" | "firstRelease">;
+// Issue yang punya event dengan status HTTP tertentu (masih tersimpan).
+async function httpIssueIds(prisma: PrismaClient, projectId: string, http: NonNullable<IssueFilter["http"]>) {
+  const rows = await prisma.$queryRaw<{ issue_id: string }[]>`
+    SELECT DISTINCT issue_id FROM events WHERE project_id = ${projectId} AND ${httpStatusSql(http)} LIMIT 10000`;
+  return rows.map((r) => r.issue_id);
+}
+
+type IssueFilter = Pick<z.infer<typeof listQuery>, "status" | "level" | "query" | "release" | "firstRelease" | "http">;
 
 // Filter halaman Issues; dipakai juga oleh ekspor CSV supaya hasilnya sama dengan yang dilihat user.
 async function issueFilter(prisma: PrismaClient, projectId: string, f: IssueFilter): Promise<Prisma.IssueWhereInput> {
   const ids = f.query ? await searchIssueIds(prisma, projectId, f.query) : null;
+  const httpIds = f.http ? await httpIssueIds(prisma, projectId, f.http) : null;
   return {
     projectId,
     ...(f.status !== "all" && { status: f.status }),
@@ -59,6 +72,7 @@ async function issueFilter(prisma: PrismaClient, projectId: string, f: IssueFilt
     ...(f.firstRelease && { firstRelease: f.firstRelease }),
     // SQLite LIKE (dipakai `contains`) tidak peka huruf besar/kecil untuk ASCII.
     ...(f.query && { OR: [{ title: { contains: f.query } }, { id: { in: ids ?? [] } }] }),
+    ...(httpIds && { id: { in: httpIds } }),
   };
 }
 
@@ -98,13 +112,13 @@ export async function issueRoutes(
     if (!q.success) return reply.code(400).send({ detail: "invalid query" });
     if (!(await projectRole(prisma, req.user!, p.data.id))) return reply.code(404).send({ detail: "not found" });
 
-    const { status, level, query, limit, release, firstRelease } = q.data;
+    const { status, level, query, limit, release, firstRelease, http } = q.data;
     const cursor = q.data.cursor ? decodeCursor(q.data.cursor) : null;
     if (q.data.cursor && !cursor) return reply.code(400).send({ detail: "invalid cursor" });
 
     const rows = await prisma.issue.findMany({
       where: {
-        ...(await issueFilter(prisma, p.data.id, { status, level, query, release, firstRelease })),
+        ...(await issueFilter(prisma, p.data.id, { status, level, query, release, firstRelease, http })),
         ...(cursor && {
           AND: [{ OR: [{ lastSeen: { lt: cursor.at } }, { lastSeen: cursor.at, id: { lt: cursor.id } }] }],
         }),
@@ -141,7 +155,7 @@ export async function issueRoutes(
     if (issues.length) {
       const counts = await prisma.$queryRaw<{ issue_id: string; n: bigint | number }[]>`
         SELECT issue_id, COUNT(DISTINCT user_id) AS n FROM events
-        WHERE project_id = ${p.data.id} AND user_id IS NOT NULL GROUP BY issue_id`;
+        WHERE issue_id IN (${Prisma.join(issues.map((i) => i.id))}) AND user_id IS NOT NULL GROUP BY issue_id`;
       for (const c of counts) users.set(c.issue_id, Number(c.n));
     }
 
@@ -158,6 +172,36 @@ export async function issueRoutes(
       .header("content-type", "text/csv; charset=utf-8")
       .header("content-disposition", `attachment; filename="issues-${date}.csv"`)
       .send(csv);
+  });
+
+  // Ekspor per event dari issue yang cocok dengan filter halaman Issues; pencarian & status HTTP juga
+  // menyaring event-nya, supaya hasil pencarian NRK hanya berisi event milik NRK itu.
+  app.get("/projects/:id/issues/events-export", async (req, reply) => {
+    const p = idParam.safeParse(req.params);
+    const q = listQuery.safeParse(req.query);
+    if (!p.success) return reply.code(404).send({ detail: "not found" });
+    if (!q.success) return reply.code(400).send({ detail: "invalid query" });
+    if (!(await projectRole(prisma, req.user!, p.data.id))) return reply.code(404).send({ detail: "not found" });
+
+    const issues = await prisma.issue.findMany({ where: await issueFilter(prisma, p.data.id, q.data), select: { id: true }, take: EXPORT_MAX });
+    const where = Prisma.join([
+      issues.length ? Prisma.sql`e.issue_id IN (${Prisma.join(issues.map((i) => i.id))})` : Prisma.sql`0=1`,
+      q.data.release ? Prisma.sql`e.release = ${q.data.release}` : Prisma.sql`1=1`,
+      eventMatchSql({ query: q.data.query, http: q.data.http }, "e."),
+    ], " AND ");
+    const date = new Date().toISOString().slice(0, 10);
+    return reply
+      .header("content-type", "text/csv; charset=utf-8")
+      .header("content-disposition", `attachment; filename="events-${date}.csv"`)
+      .send(await eventsCsv(prisma, p.data.id, where));
+  });
+
+  // Jumlah event per status HTTP di project (chip filter halaman Issues).
+  app.get("/projects/:id/issues/http-statuses", async (req, reply) => {
+    const p = idParam.safeParse(req.params);
+    if (!p.success) return reply.code(404).send({ detail: "not found" });
+    if (!(await projectRole(prisma, req.user!, p.data.id))) return reply.code(404).send({ detail: "not found" });
+    return { statusCounts: await httpStatusCounts(prisma, Prisma.sql`project_id = ${p.data.id}`) };
   });
 
   // Ringkasan per release (dari event yang masih tersimpan, jadi ikut dibatasi retensi).
@@ -200,16 +244,22 @@ export async function issueRoutes(
   app.get("/issues/:id", async (req, reply) => {
     const issue = await loadIssue(prisma, req, reply);
     if (!issue) return;
-    const latest = await prisma.event.findFirst({
-      where: { issueId: issue.id },
-      orderBy: [{ receivedAt: "desc" }, { id: "desc" }],
-    });
-    const [userCount] = await prisma.$queryRaw<{ n: bigint | number }[]>`
-      SELECT COUNT(DISTINCT user_id) AS n FROM events WHERE issue_id = ${issue.id} AND user_id IS NOT NULL`;
+    const m = matchQuery.safeParse(req.query);
+    if (!m.success) return reply.code(400).send({ detail: "invalid query" });
+    const match = matchOf(m.data);
+    const filtered = Boolean(match.query || match.http);
+    // Dengan filter (?q= / ?http=), event "terbaru" dan jumlah user dihitung dari event yang cocok saja.
+    const [latestId] = await prisma.$queryRaw<{ id: string }[]>`
+      SELECT id FROM events WHERE issue_id = ${issue.id} AND ${eventMatchSql(match)} ORDER BY received_at DESC, id DESC LIMIT 1`;
+    const latest = latestId ? await prisma.event.findUnique({ where: { id: latestId.id } }) : null;
+    const [counts] = await prisma.$queryRaw<{ users: bigint | number; events: bigint | number }[]>`
+      SELECT COUNT(DISTINCT user_id) AS users, COUNT(*) AS events FROM events WHERE issue_id = ${issue.id} AND ${eventMatchSql(match)}`;
     const v = latest ? viewEvent(issue.projectId, latest) : null;
     return {
       ...issue,
-      userCount: Number(userCount?.n ?? 0),
+      userCount: Number(counts?.users ?? 0),
+      matchCount: filtered ? Number(counts?.events ?? 0) : null,
+      statusCounts: await httpStatusCounts(prisma, Prisma.sql`issue_id = ${issue.id}`),
       latestEvent: v?.event ?? null,
       sourcemapsMissing: v?.sourcemapsMissing ?? [],
     };
@@ -241,10 +291,12 @@ export async function issueRoutes(
   app.get("/issues/:id/users", async (req, reply) => {
     const issue = await loadIssue(prisma, req, reply);
     if (!issue) return;
+    const m = matchQuery.safeParse(req.query);
+    if (!m.success) return reply.code(400).send({ detail: "invalid query" });
     // SQLite: kolom biasa di samping MAX() mengambil baris yang MAX-nya (event terakhir user itu).
     const rows = await prisma.$queryRaw<{ user_id: string; events: bigint | number; last_seen: string; last_event_id: string }[]>`
       SELECT user_id, COUNT(*) AS events, MAX(received_at) AS last_seen, id AS last_event_id
-      FROM events WHERE issue_id = ${issue.id} AND user_id IS NOT NULL
+      FROM events WHERE issue_id = ${issue.id} AND user_id IS NOT NULL AND ${eventMatchSql(matchOf(m.data))}
       GROUP BY user_id ORDER BY events DESC, last_seen DESC LIMIT 100`;
     return rows.map((r) => ({
       userId: r.user_id,
@@ -259,49 +311,38 @@ export async function issueRoutes(
     if (!issue) return;
     const q = eventsQuery.safeParse(req.query);
     if (!q.success) return reply.code(400).send({ detail: "invalid query" });
-    const cursor = q.data.cursor ? decodeCursor(q.data.cursor) : null;
-    if (q.data.cursor && !cursor) return reply.code(400).send({ detail: "invalid cursor" });
+    const page = q.data.page ?? 1;
+    const offset = (page - 1) * q.data.size;
+    if (offset >= MAX_PAGE_OFFSET) return reply.code(400).send({ detail: OLD_PAGE_MESSAGE });
+    const where = Prisma.sql`issue_id = ${issue.id} AND ${eventMatchSql(matchOf(q.data))}`;
 
-    const events = await prisma.event.findMany({
-      where: {
-        issueId: issue.id,
-        ...(cursor && {
-          OR: [{ receivedAt: { lt: cursor.at } }, { receivedAt: cursor.at, id: { lt: cursor.id } }],
-        }),
-      },
-      orderBy: [{ receivedAt: "desc" }, { id: "desc" }],
-      take: q.data.limit + 1,
-      select: { id: true, receivedAt: true, timestamp: true, level: true, release: true, environment: true, userId: true },
-    });
-    const page = events.slice(0, q.data.limit);
-    const last = page.at(-1);
+    const [total] = await prisma.$queryRaw<{ n: bigint | number }[]>`SELECT COUNT(*) AS n FROM events WHERE ${where}`;
     // Ringkasan device per event langsung dari JSON payload (tanpa memuat payload utuh).
-    const extra = page.length
-      ? await prisma.$queryRaw<{ id: string; model: string | null; manufacturer: string | null; os: string | null; online: number | null; connection: string | null }[]>`
-          SELECT id,
-            json_extract(payload, '$.contexts.device.model') AS model,
-            json_extract(payload, '$.contexts.device.manufacturer') AS manufacturer,
-            trim(coalesce(json_extract(payload, '$.contexts.os.name'), '') || ' ' || coalesce(json_extract(payload, '$.contexts.os.version'), '')) AS os,
-            json_extract(payload, '$.contexts.device.online') AS online,
-            json_extract(payload, '$.contexts.device.connection_type') AS connection
-          FROM events WHERE id IN (${Prisma.join(page.map((p) => p.id))})`
-      : [];
-    const byId = new Map(extra.map((x) => [x.id, x]));
+    const rows = await prisma.$queryRaw<{ id: string; received_at: string; release: string | null; user_id: string | null; http_status: number | null; model: string | null; manufacturer: string | null; os: string | null; online: number | null; connection: string | null }[]>`
+      SELECT id, received_at, release, user_id, http_status,
+        json_extract(payload, '$.contexts.device.model') AS model,
+        json_extract(payload, '$.contexts.device.manufacturer') AS manufacturer,
+        trim(coalesce(json_extract(payload, '$.contexts.os.name'), '') || ' ' || coalesce(json_extract(payload, '$.contexts.os.version'), '')) AS os,
+        json_extract(payload, '$.contexts.device.online') AS online,
+        json_extract(payload, '$.contexts.device.connection_type') AS connection
+      FROM events WHERE ${where} ORDER BY received_at DESC, id DESC LIMIT ${q.data.size} OFFSET ${offset}`;
     return {
-      events: page.map((ev) => {
-        const x = byId.get(ev.id);
-        return {
-          ...ev,
-          device: x ? [x.manufacturer, x.model].filter(Boolean).join(" ") || null : null,
-          os: x?.os || null,
-          online: x?.online == null ? null : Boolean(x.online),
-          connection: x?.connection ?? null,
-        };
-      }),
-      nextCursor: events.length > q.data.limit && last ? encodeCursor(last.receivedAt, last.id) : null,
+      total: Number(total?.n ?? 0),
+      page,
+      size: q.data.size,
+      events: rows.map((x) => ({
+        id: x.id,
+        receivedAt: new Date(x.received_at).toISOString(),
+        release: x.release,
+        userId: x.user_id,
+        httpStatus: x.http_status === null ? null : Number(x.http_status),
+        device: [x.manufacturer, x.model].filter(Boolean).join(" ") || null,
+        os: x.os || null,
+        online: x.online == null ? null : Boolean(x.online),
+        connection: x.connection ?? null,
+      })),
     };
   });
-
   // Hapus permanen: issue + semua event-nya (cascade) + indeks pencarian (trigger). Hanya admin project.
   app.delete("/issues/:id", async (req, reply) => {
     const issue = await loadIssue(prisma, req, reply, "admin");

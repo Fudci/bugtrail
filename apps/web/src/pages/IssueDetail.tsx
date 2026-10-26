@@ -1,12 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, ArrowLeft, BellOff, Check, Clock, ClockAlert, RotateCcw, Trash2, Users } from "lucide-react";
-import { useState } from "react";
+import { Activity, ArrowLeft, BellOff, Check, Clock, ClockAlert, RotateCcw, Search, Trash2, Users, X } from "lucide-react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 import { AffectedUsers, EventContext, EventsList, Permissions, Tags } from "./EventPanels";
 import { TraceLogs } from "../components/TraceLogs";
 import { TraceView } from "../components/TraceView";
 import { api, type EventDetail, type IssueDetail, type IssueStatus, type Member } from "../api";
 import { formatDate, initial, personName } from "../hooks";
+import { parseStatus } from "../components/status-util";
 
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -122,9 +123,22 @@ export function IssueDetailPage() {
   const qc = useQueryClient();
   const navigate = useNavigate();
   const [tab, setTab] = useState<"stack" | "minified" | "trace" | "logs" | "events" | "raw">("stack");
-  const issue = useQuery({ queryKey: ["issue", issueId], queryFn: () => api.get<IssueDetail>(`/issues/${issueId}`) });
   // Event yang sedang dilihat ada di URL (?event=...) supaya bisa dibagikan; kosong = event terbaru.
   const [params, setParams] = useSearchParams();
+  // Filter event dari halaman Issues (?q= pencarian, ?http= status): event terbaru, daftar event, dan user
+  // terdampak hanya dari event yang cocok, mis. hanya milik satu NRK.
+  const q = params.get("q") ?? "";
+  const http = (parseStatus(params.get("http")) ?? []).join(",");
+  const matchQs = new URLSearchParams();
+  if (q) matchQs.set("q", q);
+  if (http) matchQs.set("http", http);
+  const match = matchQs.toString();
+  // Kotak cari di tab Events: menulis ?q= yang sama dengan pencarian dari halaman Issues.
+  const [draft, setDraft] = useState(q);
+  useEffect(() => setDraft(q), [q]);
+  const searchEvents = (v: string) => setParams((p) => { const n = new URLSearchParams(p); if (v) n.set("q", v); else n.delete("q"); n.delete("event"); return n; });
+  const clearMatch = () => setParams((p) => { const n = new URLSearchParams(p); n.delete("q"); n.delete("http"); n.delete("event"); return n; });
+  const issue = useQuery({ queryKey: ["issue", issueId, match], queryFn: () => api.get<IssueDetail>(`/issues/${issueId}?${match}`) });
   const selectedId = params.get("event");
   const selected = useQuery({
     queryKey: ["event", issueId, selectedId],
@@ -171,7 +185,7 @@ export function IssueDetailPage() {
 
   return (
     <section>
-      <Link to={`/p/${projectId}/issues`} className="btn sm" style={{ marginBottom: "var(--s4)" }}><ArrowLeft />Issues</Link>
+      <Link to={`/p/${projectId}/issues${q || http ? `?${new URLSearchParams({ ...(q && { query: q }), ...(http && { http }) })}` : ""}`} className="btn sm" style={{ marginBottom: "var(--s4)" }}><ArrowLeft />Issues</Link>
       <div className="hero" style={{ alignItems: "flex-start", flexWrap: "wrap" }}>
         <div style={{ maxWidth: 820, minWidth: 0 }}>
           <div className="row" style={{ marginBottom: 14 }}>
@@ -215,6 +229,19 @@ export function IssueDetailPage() {
       {remove.isError && <p className="err-msg" style={{ marginTop: -20, marginBottom: 20 }}>{remove.error.message}</p>}
       {update.isError && <p className="err-msg" style={{ marginTop: -20, marginBottom: 20 }}>{update.error.message}</p>}
 
+      {match && (
+        <div className="row" style={{ marginBottom: "var(--s5)", flexWrap: "wrap", gap: 8 }}>
+          <span className="sub" style={{ fontSize: 13 }}>
+            Showing {(i.matchCount ?? 0).toLocaleString("en-US")} of {i.eventCount.toLocaleString("en-US")} events matching
+          </span>
+          {q && <span className="tag acc filter-chip">“{q}”<button type="button" className="chip-x" aria-label="Clear search filter"
+            onClick={() => setParams((p) => { const n = new URLSearchParams(p); n.delete("q"); n.delete("event"); return n; })}><X /></button></span>}
+          {http && <span className="tag acc filter-chip">status {http}<button type="button" className="chip-x" aria-label="Clear status filter"
+            onClick={() => setParams((p) => { const n = new URLSearchParams(p); n.delete("http"); n.delete("event"); return n; })}><X /></button></span>}
+          <a className="btn sm" onClick={clearMatch}>Show all events</a>
+        </div>
+      )}
+
       <div className="bigstats" style={{ marginBottom: "var(--s6)", flexWrap: "wrap" }}>
         <div className="bigstat"><span className="l"><Activity />Events</span><span className="n num">{i.eventCount.toLocaleString("en-US")}</span></div>
         <div className="bigstat"><span className="l"><Users />Users</span><span className="n num">{i.userCount.toLocaleString("en-US")}</span></div>
@@ -230,7 +257,7 @@ export function IssueDetailPage() {
               {e && hasRawStacktrace(e.payload) && <a className={tab === "minified" ? "on" : ""} onClick={() => setTab("minified")}>Minified</a>}
               {otel && <a className={tab === "trace" ? "on" : ""} onClick={() => setTab("trace")}>Trace</a>}
               {traceOf && <a className={tab === "logs" ? "on" : ""} onClick={() => setTab("logs")}>Logs</a>}
-              <a className={tab === "events" ? "on" : ""} onClick={() => setTab("events")}>Events {i.eventCount.toLocaleString("en-US")}</a>
+              <a className={tab === "events" ? "on" : ""} onClick={() => setTab("events")}>Events {(i.matchCount ?? i.eventCount).toLocaleString("en-US")}</a>
               <a className={tab === "raw" ? "on" : ""} onClick={() => setTab("raw")}>JSON</a>
             </div>
             {e && (
@@ -248,8 +275,14 @@ export function IssueDetailPage() {
               upload it with <span className="mono">sentry-cli sourcemaps upload</span> (see Settings → Source maps).
             </div>
           )}
-          {tab === "events" ? <EventsList issueId={i.id} currentEventId={e?.id} onOpen={openEvent} /> :
-            !e ? <p className="sub">{selectedId && selected.isPending ? "Loading…" : "No events yet."}</p> : tab === "stack" ? <Stacktrace payload={e.payload} /> : tab === "minified" ? <Stacktrace payload={e.payload} raw /> : tab === "trace" && otel ? <TraceView issueId={i.id} traceId={otel} /> : tab === "logs" && traceOf ? <TraceLogs projectId={projectId!} traceId={traceOf} emptyText="No logs for this event's trace." /> : (
+          {tab === "events" && (
+            <form className="field" style={{ marginBottom: "var(--s3)" }} onSubmit={(ev) => { ev.preventDefault(); searchEvents(draft.trim()); }}>
+              <Search /><input value={draft} onChange={(ev) => setDraft(ev.target.value)} placeholder="Search events: user ID / NRK, message…" aria-label="Search events" />
+              {q && <button type="button" className="chip-x" onClick={() => searchEvents("")} aria-label="Clear search"><X /></button>}
+            </form>
+          )}
+          {tab === "events" ? <EventsList key={match} issueId={i.id} match={match} currentEventId={e?.id} onOpen={openEvent} /> :
+            !e ? <p className="sub">{selectedId && selected.isPending ? "Loading…" : match ? "No retained events match this filter." : "No events yet."}</p> : tab === "stack" ? <Stacktrace payload={e.payload} /> : tab === "minified" ? <Stacktrace payload={e.payload} raw /> : tab === "trace" && otel ? <TraceView issueId={i.id} traceId={otel} /> : tab === "logs" && traceOf ? <TraceLogs projectId={projectId!} traceId={traceOf} emptyText="No logs for this event's trace." /> : (
             <pre className="code" style={{ maxHeight: 600 }}>{JSON.stringify(e.payload, null, 2)}</pre>
           )}
         </div>
@@ -260,7 +293,7 @@ export function IssueDetailPage() {
           </div>
           {e && <Permissions event={e} />}
           {e && <Tags event={e} />}
-          <AffectedUsers issueId={i.id} currentEventId={e?.id} onOpen={openEvent} />
+          <AffectedUsers issueId={i.id} match={match} currentEventId={e?.id} onOpen={openEvent} />
           <div className="card">
             <div className="head"><h2>Breadcrumbs</h2></div>
             {e && <Breadcrumbs payload={e.payload} />}

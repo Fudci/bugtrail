@@ -3,6 +3,8 @@ import { z } from "zod";
 import { Prisma, toDbDate, type PrismaClient } from "@bugtool/db";
 import { projectRole, requireUser } from "../auth/session.js";
 import { toCsv } from "./csv.js";
+import { eventsCsv, httpParam, httpStatusCounts, httpStatusSql } from "./events-query.js";
+import type { StatusFilter } from "../otlp/status-filter.js";
 
 const RANGES = { "24h": { ms: 24 * 3600_000, bucket: "hour" }, "7d": { ms: 7 * 86400_000, bucket: "day" }, "14d": { ms: 14 * 86400_000, bucket: "day" }, "30d": { ms: 30 * 86400_000, bucket: "day" } } as const;
 
@@ -13,6 +15,7 @@ const query = z.object({
   level: z.enum(["fatal", "error", "warning", "info", "debug"]).optional(),
   // Offset zona waktu browser dalam menit (mis. WIB = 420), supaya batas hari sesuai jam lokal.
   platform: z.string().max(100).optional(),
+  http: httpParam,
   tz: z.coerce.number().int().min(-840).max(840).default(0),
 });
 
@@ -23,7 +26,9 @@ const EXPORT_MAX = 10_000;
 // Platform = nama OS dari SDK, atau field platform kalau OS tidak dikirim (sama dengan kartu Platforms).
 const PLATFORM_SQL = "coalesce(json_extract(payload, '$.contexts.os.name'), json_extract(payload, '$.platform'), 'unknown')";
 
-function eventFilter(pid: string, f: { release?: string | undefined; environment?: string | undefined; level?: string | undefined; platform?: string | undefined }) {
+type Filter = { release?: string | undefined; environment?: string | undefined; level?: string | undefined; platform?: string | undefined; http?: StatusFilter | undefined };
+
+function eventFilter(pid: string, f: Filter) {
   return (a: Date, b: Date, alias = "") => {
     const col = (c: string) => Prisma.raw(`${alias}${c}`);
     return Prisma.join(
@@ -33,6 +38,7 @@ function eventFilter(pid: string, f: { release?: string | undefined; environment
         f.environment ? Prisma.sql`${col("environment")} = ${f.environment}` : Prisma.sql`1=1`,
         f.level ? Prisma.sql`${col("level")} = ${f.level}` : Prisma.sql`1=1`,
         f.platform ? Prisma.sql`${Prisma.raw(PLATFORM_SQL.replaceAll("payload", `${alias}payload`))} = ${f.platform}` : Prisma.sql`1=1`,
+        f.http ? httpStatusSql(f.http, alias) : Prisma.sql`1=1`,
         Prisma.sql`${col("received_at")} >= ${toDbDate(a)} AND ${col("received_at")} < ${toDbDate(b)}`,
       ],
       " AND ",
@@ -53,17 +59,19 @@ export async function overviewRoutes(app: FastifyInstance, { prisma }: { prisma:
     if (!(await projectRole(prisma, req.user!, id.data))) return reply.code(404).send({ detail: "not found" });
 
     const pid = id.data;
-    const { range, release, environment, level, platform, tz } = q.data;
+    const { range, release, environment, level, platform, http, tz } = q.data;
     const { ms, bucket } = RANGES[range];
     const to = new Date();
     const from = new Date(to.getTime() - ms);
     const prevFrom = new Date(from.getTime() - ms);
 
-    const inRange = eventFilter(pid, { release, environment, level, platform });
+    const inRange = eventFilter(pid, { release, environment, level, platform, http });
     // Pembagian per level sengaja tanpa filter level, supaya level lain tetap terlihat untuk dibandingkan.
-    const inRangeAllLevels = eventFilter(pid, { release, environment, platform });
+    const inRangeAllLevels = eventFilter(pid, { release, environment, platform, http });
     // Sama untuk platform: daftar platform tidak ikut difilter platform.
-    const inRangeAllPlatforms = eventFilter(pid, { release, environment, level });
+    const inRangeAllPlatforms = eventFilter(pid, { release, environment, level, http });
+    // Dan chip status HTTP: jumlahnya tanpa filter status.
+    const inRangeAllStatuses = eventFilter(pid, { release, environment, level, platform });
 
     const totals = async (a: Date, b: Date) => {
       const [t] = await prisma.$queryRaw<{ events: bigint; users: bigint }[]>`
@@ -77,7 +85,7 @@ export async function overviewRoutes(app: FastifyInstance, { prisma }: { prisma:
     const shift = `${tz >= 0 ? "+" : ""}${tz} minutes`;
     const fmt = bucket === "hour" ? "%Y-%m-%dT%H" : "%Y-%m-%d";
 
-    const [current, previous, seriesRows, levels, top, platforms, releases, environments] = await Promise.all([
+    const [current, previous, seriesRows, levels, top, platforms, releases, environments, statusCounts] = await Promise.all([
       totals(from, to),
       totals(prevFrom, from),
       prisma.$queryRaw<{ t: string; n: bigint }[]>`
@@ -95,6 +103,7 @@ export async function overviewRoutes(app: FastifyInstance, { prisma }: { prisma:
         SELECT DISTINCT release AS v FROM events WHERE project_id = ${pid} AND release IS NOT NULL ORDER BY received_at DESC LIMIT 50`,
       prisma.$queryRaw<{ v: string }[]>`
         SELECT DISTINCT environment AS v FROM events WHERE project_id = ${pid} AND environment IS NOT NULL LIMIT 50`,
+      httpStatusCounts(prisma, inRangeAllStatuses(from, to)),
     ]);
 
     // Isi bucket kosong supaya grafik selalu punya titik untuk setiap jam/hari.
@@ -116,6 +125,7 @@ export async function overviewRoutes(app: FastifyInstance, { prisma }: { prisma:
       platforms: platforms.map((p) => ({ name: p.name ?? "unknown", events: n(p.n) })),
       releases: releases.map((r) => r.v),
       environments: environments.map((r) => r.v),
+      statusCounts,
     };
   });
 
@@ -127,14 +137,14 @@ export async function overviewRoutes(app: FastifyInstance, { prisma }: { prisma:
     if (!q.success) return reply.code(400).send({ detail: "invalid query" });
     if (!(await projectRole(prisma, req.user!, id.data))) return reply.code(404).send({ detail: "not found" });
 
-    const { range, release, environment, level, platform } = q.data;
+    const { range, release, environment, level, platform, http } = q.data;
     const to = new Date();
     const from = new Date(to.getTime() - RANGES[range].ms);
     const rows = await prisma.$queryRaw<{ id: string; title: string; culprit: string | null; level: string; status: string; events: bigint; users: bigint; first: string; last: string; first_seen: string }[]>`
       SELECT i.id, i.title, i.culprit, i.level, i.status, COUNT(*) AS events, COUNT(DISTINCT e.user_id) AS users,
              MIN(e.received_at) AS first, MAX(e.received_at) AS last, i.first_seen
       FROM events e JOIN issues i ON i.id = e.issue_id
-      WHERE ${eventFilter(id.data, { release, environment, level, platform })(from, to, "e.")}
+      WHERE ${eventFilter(id.data, { release, environment, level, platform, http })(from, to, "e.")}
       GROUP BY i.id ORDER BY events DESC LIMIT ${EXPORT_MAX}`;
 
     const web = (process.env["WEB_URL"] ?? process.env["PUBLIC_URL"] ?? "").replace(/\/$/, "");
@@ -146,6 +156,24 @@ export async function overviewRoutes(app: FastifyInstance, { prisma }: { prisma:
     return reply
       .header("content-type", "text/csv; charset=utf-8")
       .header("content-disposition", `attachment; filename="overview-${range}-${to.toISOString().slice(0, 10)}.csv"`)
+      .send(csv);
+  });
+
+  // Ekspor per event (satu baris per event) dengan filter overview yang sama.
+  app.get("/projects/:id/overview/events-export", async (req, reply) => {
+    const id = z.uuid().safeParse((req.params as { id?: string }).id);
+    const q = query.safeParse(req.query);
+    if (!id.success) return reply.code(404).send({ detail: "not found" });
+    if (!q.success) return reply.code(400).send({ detail: "invalid query" });
+    if (!(await projectRole(prisma, req.user!, id.data))) return reply.code(404).send({ detail: "not found" });
+
+    const { range, release, environment, level, platform, http } = q.data;
+    const to = new Date();
+    const from = new Date(to.getTime() - RANGES[range].ms);
+    const csv = await eventsCsv(prisma, id.data, eventFilter(id.data, { release, environment, level, platform, http })(from, to, "e."));
+    return reply
+      .header("content-type", "text/csv; charset=utf-8")
+      .header("content-disposition", `attachment; filename="events-${range}-${to.toISOString().slice(0, 10)}.csv"`)
       .send(csv);
   });
 }

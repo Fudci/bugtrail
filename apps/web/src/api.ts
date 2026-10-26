@@ -66,6 +66,10 @@ export interface EventDetail {
 }
 export interface IssueDetail extends IssueSummary {
   projectId: string; role: Role; userCount: number; latestEvent: EventDetail | null;
+  /** Jumlah event yang cocok dengan ?q= / ?http=; null kalau tanpa filter. */
+  matchCount: number | null;
+  /** Jumlah event per status HTTP di issue ini (kosong kalau event tidak membawa status). */
+  statusCounts: { code: number; count: number }[];
   /** Debug ID yang dirujuk event tapi source map-nya belum diunggah. */
   sourcemapsMissing: string[];
 }

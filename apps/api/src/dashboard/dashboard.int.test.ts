@@ -452,3 +452,80 @@ describe("overview & sparklines", () => {
     expect(spark[13]).toBeGreaterThanOrEqual(1);
   });
 });
+
+describe("filter event: pencarian & status HTTP", () => {
+  // Satu issue (fingerprint sama) dengan event dari beberapa user & status, seperti HttpError dari mobile.
+  async function setup() {
+    const admin = as(await login("admin@x.io"));
+    const pid = (await admin.post("/projects", { name: "P" })).json().id as string;
+    const issue = await prisma.issue.create({
+      data: { projectId: pid, fingerprint: "http", title: "HttpError: PATCH /attendance — 409 · NRK 201221244", firstSeen: new Date(), lastSeen: new Date(), eventCount: 4 },
+    });
+    const ev = (user: string, status: string, ago: number) => ({ user, status, at: new Date(Date.now() - ago * 60_000) });
+    for (const e of [ev("201221244", "409", 1), ev("2608110061", "409", 2), ev("201221244", "502", 3), ev("492283770", "500", 4)]) {
+      const id = crypto.randomUUID();
+      await prisma.event.create({
+        data: { id, projectId: pid, issueId: issue.id, timestamp: e.at, receivedAt: e.at, userId: e.user,
+          payload: { message: `PATCH failed NRK ${e.user}`, tags: { status: e.status, method: "PATCH", route: "/attendance" }, contexts: { os: { name: "Android", version: "16" } } } },
+      });
+      raw.prepare("INSERT INTO events_fts (content, event_id, issue_id, project_id) VALUES (?, ?, ?, ?)").run(`PATCH failed NRK ${e.user}`, id, issue.id, pid);
+    }
+    return { admin, pid, issue };
+  }
+
+  it("detail issue & daftar event hanya berisi event yang cocok dengan ?q=", async () => {
+    const { admin, issue } = await setup();
+    const d = (await admin.get(`/issues/${issue.id}?q=201221244`)).json();
+    expect(d.matchCount).toBe(2);
+    expect(d.userCount).toBe(1);
+    expect(d.latestEvent.userId).toBe("201221244");
+    expect((await admin.get(`/issues/${issue.id}`)).json().matchCount).toBeNull();
+
+    const page = (await admin.get(`/issues/${issue.id}/events?q=201221244&size=25`)).json();
+    expect(page.total).toBe(2);
+    expect(page.events.every((e: { userId: string }) => e.userId === "201221244")).toBe(true);
+    expect(page.events.map((e: { httpStatus: number }) => e.httpStatus)).toEqual([409, 502]);
+
+    const users = (await admin.get(`/issues/${issue.id}/users?q=201221244`)).json();
+    expect(users.map((u: { userId: string }) => u.userId)).toEqual(["201221244"]);
+  });
+
+  it("pagination bernomor pada daftar event", async () => {
+    const { admin, issue } = await setup();
+    const all = (await admin.get(`/issues/${issue.id}/events?size=25`)).json();
+    expect(all.total).toBe(4);
+    expect((await admin.get(`/issues/${issue.id}/events?size=25&page=2`)).json().events).toHaveLength(0);
+    expect((await admin.get(`/issues/${issue.id}/events?size=25&page=1000`)).statusCode).toBe(400);
+  });
+
+  it("filter ?http= di issues, detail, overview; jumlah per status", async () => {
+    const { admin, pid, issue } = await setup();
+    await seedIssue(pid, "no status");
+    const list = (await admin.get(`/projects/${pid}/issues?http=5xx`)).json();
+    expect(list.issues.map((i: { id: string }) => i.id)).toEqual([issue.id]);
+    expect((await admin.get(`/projects/${pid}/issues?http=abc`)).statusCode).toBe(400);
+    expect((await admin.get(`/issues/${issue.id}?http=409`)).json().matchCount).toBe(2);
+
+    const counts = (await admin.get(`/projects/${pid}/issues/http-statuses`)).json().statusCounts;
+    expect(counts.sort((a: { code: number }, b: { code: number }) => a.code - b.code)).toEqual([
+      { code: 409, count: 2 }, { code: 500, count: 1 }, { code: 502, count: 1 },
+    ]);
+    const ov = (await admin.get(`/projects/${pid}/overview?http=502`)).json();
+    expect(ov.totals.events).toBe(1);
+    expect(ov.statusCounts).toHaveLength(3);
+  });
+
+  it("ekspor per event ikut pencarian & status", async () => {
+    const { admin, pid } = await setup();
+    const csv = (await admin.get(`/projects/${pid}/issues/events-export?status=all&query=201221244`)).body;
+    const lines = csv.trim().split("\r\n");
+    expect(lines[0]).toContain("event_id,received_at,issue_id,issue_title,level,http_status,method,route,user_id");
+    expect(lines).toHaveLength(3);
+    expect(lines.slice(1).every((l) => l.includes(",201221244,"))).toBe(true);
+    expect(lines[1]).toContain("Android 16");
+
+    const ov = (await admin.get(`/projects/${pid}/overview/events-export?http=500`)).body.trim().split("\r\n");
+    expect(ov).toHaveLength(2);
+    expect(ov[1]).toContain(",500,PATCH,/attendance,492283770,");
+  });
+});
