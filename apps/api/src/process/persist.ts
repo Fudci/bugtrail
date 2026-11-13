@@ -52,8 +52,8 @@ function statements(db: RawDb) {
     updateIssue: db.prepare(`UPDATE issues SET event_count = event_count + ?, first_seen = ?, last_seen = ?,
       status = CASE WHEN status = 'resolved' THEN 'unresolved' ELSE status END WHERE id = ?`),
     insertEvent: db.prepare(`INSERT INTO events
-      (id, project_id, issue_id, received_at, timestamp, level, release, environment, user_id, payload)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+      (id, project_id, issue_id, received_at, timestamp, level, release, environment, user_id, platform, http_status, payload)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
     insertFts: db.prepare("INSERT INTO events_fts (content, event_id, issue_id, project_id) VALUES (?, ?, ?, ?)"),
     deleteQueued: db.prepare("DELETE FROM ingest_queue WHERE id = ?"),
   };
@@ -143,7 +143,8 @@ export function persistBatch(db: RawDb, jobs: QueuedJob[], symbolicator?: Symbol
       for (const p of group) {
         st.insertEvent.run(
           p.e.eventId, p.job.projectId, issueId, toDbDate(p.receivedAt), toDbDate(p.e.timestamp), p.e.level,
-          p.e.release ?? null, p.e.environment ?? null, p.e.userId ?? null, JSON.stringify(p.job.payload),
+          p.e.release ?? null, p.e.environment ?? null, p.e.userId ?? null, p.e.platform ?? null, p.e.httpStatus ?? null,
+          JSON.stringify(p.job.payload),
         );
         st.insertFts.run(searchText(p.e), p.e.eventId, issueId, p.job.projectId);
         result.projects.add(p.job.projectId);

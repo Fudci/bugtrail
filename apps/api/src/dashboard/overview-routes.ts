@@ -23,8 +23,9 @@ const n = (v: bigint | number | null | undefined) => Number(v ?? 0);
 const EXPORT_MAX = 10_000;
 
 // Kondisi WHERE untuk event dalam rentang waktu + filter overview. alias: prefix tabel, mis. "e.".
-// Platform = nama OS dari SDK, atau field platform kalau OS tidak dikirim (sama dengan kartu Platforms).
-const PLATFORM_SQL = "coalesce(json_extract(payload, '$.contexts.os.name'), json_extract(payload, '$.platform'), 'unknown')";
+// Platform = kolom events.platform (nama OS dari SDK, atau field platform), sama dengan kartu Platforms.
+// Kolom biasa, bukan json_extract: mengurai payload tiap event membuat Overview butuh puluhan detik.
+const PLATFORM_SQL = "coalesce(platform, 'unknown')";
 
 type Filter = { release?: string | undefined; environment?: string | undefined; level?: string | undefined; platform?: string | undefined; http?: StatusFilter | undefined };
 
@@ -37,7 +38,7 @@ function eventFilter(pid: string, f: Filter) {
         f.release ? Prisma.sql`${col("release")} = ${f.release}` : Prisma.sql`1=1`,
         f.environment ? Prisma.sql`${col("environment")} = ${f.environment}` : Prisma.sql`1=1`,
         f.level ? Prisma.sql`${col("level")} = ${f.level}` : Prisma.sql`1=1`,
-        f.platform ? Prisma.sql`${Prisma.raw(PLATFORM_SQL.replaceAll("payload", `${alias}payload`))} = ${f.platform}` : Prisma.sql`1=1`,
+        f.platform ? Prisma.sql`${Prisma.raw(PLATFORM_SQL.replace("platform", `${alias}platform`))} = ${f.platform}` : Prisma.sql`1=1`,
         f.http ? httpStatusSql(f.http, alias) : Prisma.sql`1=1`,
         Prisma.sql`${col("received_at")} >= ${toDbDate(a)} AND ${col("received_at")} < ${toDbDate(b)}`,
       ],

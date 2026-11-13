@@ -33,6 +33,10 @@ export interface NormalizedEvent {
   fingerprint?: string[] | undefined;
   title: string;
   culprit?: string | undefined;
+  /** Nama OS (contexts.os.name) atau field platform; kolom events.platform. */
+  platform?: string | undefined;
+  /** Status HTTP dari tag status / http.status_code atau contexts.response; kolom events.http_status. */
+  httpStatus?: number | undefined;
 }
 
 // event_id SDK: 32 hex tanpa tanda hubung -> bentuk uuid untuk kolom @db.Uuid.
@@ -81,6 +85,20 @@ function parseMessage(e: Obj): string | undefined {
   return str(e["message"]);
 }
 
+// Tags SDK: object {k: v} atau array pasangan [[k, v]] (bentuk lama).
+function tagOf(tags: unknown, key: string): unknown {
+  if (isObj(tags)) return tags[key];
+  if (Array.isArray(tags)) return tags.find((t) => Array.isArray(t) && t[0] === key)?.[1];
+  return undefined;
+}
+
+function httpStatusOf(payload: Obj): number | undefined {
+  const res = isObj(payload["contexts"]) && isObj(payload["contexts"]["response"]) ? payload["contexts"]["response"]["status_code"] : undefined;
+  const raw = tagOf(payload["tags"], "status") ?? tagOf(payload["tags"], "http.status_code") ?? res;
+  const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number.parseInt(raw, 10) : NaN;
+  return Number.isInteger(n) && n >= 100 && n <= 599 ? n : undefined;
+}
+
 // Frame paling relevan = frame in_app terakhir (paling dalam), fallback frame terakhir.
 function topFrame(frames: Frame[]): Frame | undefined {
   return [...frames].reverse().find((f) => f.inApp) ?? frames.at(-1);
@@ -103,6 +121,7 @@ export function normalizeEvent(payload: unknown, receivedAt: Date): NormalizedEv
     ? [main.type, main.value].filter(Boolean).join(": ") || "<unknown error>"
     : (message?.split("\n")[0] ?? "<no message>");
   const tf = main ? topFrame(main.frames) : undefined;
+  const os = isObj(payload["contexts"]) && isObj(payload["contexts"]["os"]) ? payload["contexts"]["os"] : {};
   const culprit = str(payload["culprit"]) ?? str(payload["transaction"]) ??
     (tf ? [tf.module ?? tf.filename, tf.function].filter(Boolean).join(" in ") || undefined : undefined);
 
@@ -118,6 +137,8 @@ export function normalizeEvent(payload: unknown, receivedAt: Date): NormalizedEv
     fingerprint: Array.isArray(fp) && fp.length > 0 ? fp.map(String) : undefined,
     title: title.slice(0, 500),
     culprit: culprit?.slice(0, 500),
+    platform: (str(os["name"]) ?? str(payload["platform"]))?.slice(0, 100),
+    httpStatus: httpStatusOf(payload),
   };
 }
 

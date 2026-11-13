@@ -41,6 +41,19 @@ describe("normalizeEvent", () => {
     expect(e.level).toBe("error");
   });
 
+  it("extracts platform and HTTP status (object or array tags, response context)", () => {
+    const base = { event_id: "9ec79c33ec9942ab8353589fcb2e04dc", message: "x" };
+    const a = normalizeEvent({ ...base, platform: "javascript", contexts: { os: { name: "iOS" } }, tags: { status: "409" } }, now);
+    expect([a.platform, a.httpStatus]).toEqual(["iOS", 409]);
+    const b = normalizeEvent({ ...base, platform: "node", tags: [["http.status_code", "502"]] }, now);
+    expect([b.platform, b.httpStatus]).toEqual(["node", 502]);
+    const c = normalizeEvent({ ...base, contexts: { response: { status_code: 500 } } }, now);
+    expect(c.httpStatus).toBe(500);
+    const d = normalizeEvent({ ...base, tags: { status: "active" } }, now);
+    expect([d.platform, d.httpStatus]).toEqual([undefined, undefined]);
+    expect(normalizeEvent({ ...base, tags: { status: "999" } }, now).httpStatus).toBeUndefined();
+  });
+
   it("rejects missing event_id", () => {
     expect(() => normalizeEvent({}, now)).toThrow(/event_id/);
     expect(() => toUuid("xyz")).toThrow();

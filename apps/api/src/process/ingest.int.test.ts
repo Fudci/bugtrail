@@ -80,6 +80,14 @@ describe("ingest end-to-end", () => {
     expect(await prisma.event.count({ where: { projectId } })).toBe(3);
   });
 
+  it("stores platform and HTTP status columns from the payload", async () => {
+    const ev = { ...errorEvent(id(7)), platform: "javascript", contexts: { os: { name: "Android" } }, tags: { status: "409" } };
+    await app.inject({ method: "POST", url: `${path()}?sentry_key=${KEY}`, payload: envelope(ev), headers: { "content-type": "text/plain" } });
+    await drain();
+    const row = await prisma.event.findFirstOrThrow({ where: { projectId }, select: { platform: true, httpStatus: true } });
+    expect(row).toEqual({ platform: "Android", httpStatus: 409 });
+  });
+
   it("accepts gzip + X-Sentry-Auth, and dsn in envelope header", async () => {
     const r1 = await app.inject({
       method: "POST",

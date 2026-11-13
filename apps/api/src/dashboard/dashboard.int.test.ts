@@ -388,7 +388,7 @@ describe("overview & sparklines", () => {
   async function ev(projectId: string, issueId: string, at: Date, extra: { level?: "error" | "warning"; release?: string; environment?: string; userId?: string; os?: string } = {}) {
     const { os, ...cols } = extra;
     await prisma.event.create({
-      data: { id: crypto.randomUUID(), projectId, issueId, timestamp: at, receivedAt: at, ...cols, payload: os ? { contexts: { os: { name: os } } } : {} },
+      data: { id: crypto.randomUUID(), projectId, issueId, timestamp: at, receivedAt: at, ...cols, platform: os ?? null, payload: os ? { contexts: { os: { name: os } } } : {} },
     });
   }
 
@@ -465,7 +465,7 @@ describe("filter event: pencarian & status HTTP", () => {
     for (const e of [ev("201221244", "409", 1), ev("2608110061", "409", 2), ev("201221244", "502", 3), ev("492283770", "500", 4)]) {
       const id = crypto.randomUUID();
       await prisma.event.create({
-        data: { id, projectId: pid, issueId: issue.id, timestamp: e.at, receivedAt: e.at, userId: e.user,
+        data: { id, projectId: pid, issueId: issue.id, timestamp: e.at, receivedAt: e.at, userId: e.user, platform: "Android", httpStatus: Number(e.status),
           payload: { message: `PATCH failed NRK ${e.user}`, tags: { status: e.status, method: "PATCH", route: "/attendance" }, contexts: { os: { name: "Android", version: "16" } } } },
       });
       raw.prepare("INSERT INTO events_fts (content, event_id, issue_id, project_id) VALUES (?, ?, ?, ?)").run(`PATCH failed NRK ${e.user}`, id, issue.id, pid);

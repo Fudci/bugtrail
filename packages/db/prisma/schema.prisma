@@ -150,6 +150,9 @@ model Event {
   release      String?
   environment  String?
   userId       String?                   @map("user_id")
+  // Diisi saat ingest dari payload (process/normalize.ts), supaya query tidak perlu mengurai JSON.
+  platform     String?
+  httpStatus   Int?                      @map("http_status")
   payload      Json
   project      Project                   @relation(fields: [projectId], references: [id], onDelete: Cascade)
   issue        Issue                     @relation(fields: [issueId], references: [id], onDelete: Cascade)
